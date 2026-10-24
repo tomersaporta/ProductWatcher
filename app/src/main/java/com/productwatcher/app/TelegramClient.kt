@@ -122,6 +122,11 @@ object TelegramClient {
     }
     private fun failDownload(fileId: Int) { downloads.remove(fileId)?.forEach { it(null) } }
 
+
+    fun deleteDownloadedPhoto(fileId: Int) {
+        send(TdApi.DeleteFile(fileId))
+    }
+
     fun loadChats() {
         if (!ready) return
         send(TdApi.LoadChats(TdApi.ChatListMain(), 100)) {

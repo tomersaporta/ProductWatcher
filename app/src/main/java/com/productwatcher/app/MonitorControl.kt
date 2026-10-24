@@ -12,6 +12,11 @@ object MonitorControl {
     private const val WORK = "telegram_catchup"
     fun enabled(ctx: Context) = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).getBoolean("monitoring_enabled", false)
     fun setEnabled(ctx: Context, value: Boolean) = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).edit().putBoolean("monitoring_enabled", value).apply()
+
+    fun ensureAutomatic(ctx: Context) {
+        if (!enabled(ctx)) start(ctx)
+    }
+
     fun start(ctx: Context) {
         setEnabled(ctx, true)
         val work = PeriodicWorkRequestBuilder<TelegramCatchupWorker>(15, TimeUnit.MINUTES).build()
