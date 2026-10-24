@@ -1,69 +1,99 @@
 package com.productwatcher.app
 
 import android.app.Activity
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.text.InputType
-import android.view.ViewGroup
+import android.view.Gravity
+import android.view.View
 import android.widget.*
 import org.drinkless.tdlib.TdApi
 
 class TelegramActivity : Activity() {
+    private val bg = Color.rgb(11, 18, 32)
+    private val surface = Color.rgb(24, 36, 54)
+    private val accent = Color.rgb(89, 222, 189)
+    private val muted = Color.rgb(175, 190, 211)
     private lateinit var root: LinearLayout
     private lateinit var status: TextView
+    private lateinit var scanStatus: TextView
     private lateinit var field: EditText
     private lateinit var chatList: LinearLayout
-    private fun label(s: String) = TextView(this).apply { text = s; textSize = 17f; setPadding(8, 12, 8, 12) }
-    private fun button(s: String, f: () -> Unit) = Button(this).apply { text = s; setOnClickListener { f() } }
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun label(s: String, size: Float = 16f, color: Int = Color.WHITE) = TextView(this).apply {
+        text = s; textSize = size; setTextColor(color); setPadding(0, dp(8), 0, dp(8))
+    }
+    private fun button(s: String, f: () -> Unit) = TextView(this).apply {
+        text = s; textSize = 14f; typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER; setTextColor(bg); setPadding(dp(14), dp(14), dp(14), dp(14))
+        background = GradientDrawable().apply { setColor(accent); cornerRadius = dp(12).toFloat() }
+        setOnClickListener { f() }
+        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(10) }
+    }
+    private fun input(hintText: String, type: Int = InputType.TYPE_CLASS_TEXT) = EditText(this).apply {
+        hint = hintText; inputType = type; setTextColor(Color.WHITE); setHintTextColor(muted)
+        textSize = 15f; isSingleLine = true
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 24, 24, 24) }
-        val scroll = ScrollView(this); scroll.addView(root); setContentView(scroll)
-        root.addView(label("Telegram direct connection (TDLib)"))
-        status = label("Starting"); root.addView(status)
-        val apiId = EditText(this).apply { hint = "API ID (from my.telegram.org)"; inputType = InputType.TYPE_CLASS_NUMBER }
-        val apiHash = EditText(this).apply { hint = "API Hash"; inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD }
+        window.statusBarColor = bg; window.navigationBarColor = bg
+        root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(24), dp(20), dp(32)) }
+        val scroll = ScrollView(this).apply { setBackgroundColor(bg) }; scroll.addView(root); setContentView(scroll)
+        root.addView(label("TELEGRAM CONNECTION", 13f, accent))
+        root.addView(label("Channel monitor", 27f))
+        status = label("Starting", 16f); root.addView(status)
+        scanStatus = label("No scan yet", 13f, muted); root.addView(scanStatus)
+        val apiId = input("API ID (my.telegram.org)", InputType.TYPE_CLASS_NUMBER)
+        val apiHash = input("API Hash", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
         root.addView(apiId); root.addView(apiHash)
-        root.addView(button("Connect") {
+        root.addView(button("CONNECT") {
             val id = apiId.text.toString().toIntOrNull()
             if (id == null || apiHash.text.isBlank()) Toast.makeText(this, "Enter API ID and hash", Toast.LENGTH_SHORT).show()
-            else { TelegramClient.start(this, id, apiHash.text.toString()); apiHash.text.clear(); refresh() }
+            else { TelegramClient.start(this, id, apiHash.text.toString()); apiHash.text.clear(); MonitorControl.start(this); refresh() }
         })
-        field = EditText(this).apply { hint = "Phone / code / password (depending on status)" }
+        field = input("Phone / code / 2FA password")
         root.addView(field)
-        root.addView(button("Submit login step") { TelegramClient.submit(field.text.toString()); field.text.clear() })
-        root.addView(button("Load my channels") { TelegramClient.loadChats(); showChats() })
+        root.addView(button("SUBMIT LOGIN STEP") { TelegramClient.submit(field.text.toString()); field.text.clear() })
+        root.addView(button("START BACKGROUND MONITORING") {
+            try { MonitorControl.start(this); refresh() }
+            catch (e: Exception) { Toast.makeText(this, "Could not start monitoring: ${e.message}", Toast.LENGTH_LONG).show() }
+        })
+        root.addView(button("STOP BACKGROUND MONITORING") { MonitorControl.stop(this); refresh() })
+        root.addView(button("LOAD MY CHANNELS") { TelegramClient.loadChats(); showChats() })
+        val selected = getSharedPreferences("telegram_source", MODE_PRIVATE).getString("chat_title", null)
+        root.addView(label("Selected: ${selected ?: "No channel selected"}", 14f, muted))
         chatList = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }; root.addView(chatList)
         TelegramClient.onUpdate = { runOnUiThread { refresh() } }
         TelegramClient.onChats = { runOnUiThread { showChats() } }
         TelegramClient.onHistory = { messages -> runOnUiThread { process(messages) } }
+        TelegramOfferScanner.onStatus = { runOnUiThread { refresh() } }
         TelegramClient.resume(this)
         refresh()
     }
-    private fun refresh() { status.text = "Status: ${TelegramClient.state}"; if (TelegramClient.ready) showChats() }
+    private fun refresh() {
+        status.text = "● ${TelegramClient.state}"
+        status.setTextColor(if (TelegramClient.ready) accent else muted)
+        scanStatus.text = (if (MonitorControl.enabled(this)) "Background monitor enabled" else "Background monitor stopped") + "\n" + Store.telegramStatus(this)
+    }
     private fun showChats() {
         chatList.removeAllViews()
         val chats = TelegramClient.listChats().sortedBy { it.title }
-        chatList.addView(label("Channels / supergroups (${chats.size}). Select 'קונים באושר':"))
+        chatList.addView(label("CHANNELS (${chats.size}) · Select קונים באושר", 13f, accent))
         for (chat in chats) chatList.addView(button(chat.title) {
             getSharedPreferences("telegram_source", MODE_PRIVATE).edit().putLong("chat_id", chat.id).putString("chat_title", chat.title).apply()
             TelegramClient.readHistory(chat.id)
-            status.text = "Reading: ${chat.title}"
+            if (!MonitorControl.enabled(this)) MonitorControl.start(this)
+            status.text = "Automatic monitoring: ${chat.title}"
         })
     }
     private fun process(messages: List<TdApi.Message>) {
-        val matched = messages.count { msg ->
-            val content = msg.content
-            val text = when (content) {
-                is TdApi.MessageText -> content.text.text
-                is TdApi.MessagePhoto -> content.caption.text
-                else -> ""
-            }
-            Store.products(this).any { Matcher.matches(text, it) }
-        }
-        status.text = "Read ${messages.size} recent posts. Text/caption matches: $matched. Image OCR is not yet connected."
+        scanStatus.text = "Received ${messages.size} posts. Downloading images and running OCR…"
     }
     override fun onDestroy() {
         TelegramClient.onUpdate = null; TelegramClient.onChats = null; TelegramClient.onHistory = null
+        TelegramOfferScanner.onStatus = null
         super.onDestroy()
     }
 }

@@ -17,4 +17,6 @@ object Store {
     fun markSeen(ctx: Context, key: String) = prefs(ctx).edit().putBoolean("seen_$key", true).apply()
     fun status(ctx: Context) = prefs(ctx).getString("status", "No scan yet") ?: "No scan yet"
     fun setStatus(ctx: Context, status: String) = prefs(ctx).edit().putString("status", status).apply()
+    fun telegramStatus(ctx: Context) = prefs(ctx).getString("telegram_status", "No Telegram scan yet") ?: "No Telegram scan yet"
+    fun setTelegramStatus(ctx: Context, status: String) = prefs(ctx).edit().putString("telegram_status", status).apply()
 }
