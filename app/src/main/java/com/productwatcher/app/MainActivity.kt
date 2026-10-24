@@ -150,6 +150,12 @@ class MainActivity : ComponentActivity() {
         })
         content.addView(watch)
 
+        val telegram = panel()
+        telegram.addView(text("TELEGRAM DIRECT CONNECTION", 12f, muted, true))
+        telegram.addView(text("Connect your account and select a channel", 17f, Color.WHITE, true))
+        telegram.addView(action("Connect Telegram", false) { startActivity(Intent(this, TelegramActivity::class.java)) })
+        content.addView(telegram)
+
         val integration = panel()
         integration.addView(text("CHATGPT INTEGRATION", 12f, muted, true))
         integration.addView(text("Share a scan summary", 19f, Color.WHITE, true))
