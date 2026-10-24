@@ -48,6 +48,10 @@ class TelegramActivity : Activity() {
         val apiId = input("API ID (my.telegram.org)", InputType.TYPE_CLASS_NUMBER)
         val apiHash = input("API Hash", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
         root.addView(apiId); root.addView(apiHash)
+        if (getSharedPreferences("telegram_auth", MODE_PRIVATE).getInt("api_id", 0) > 0) {
+            apiId.visibility = View.GONE
+            apiHash.visibility = View.GONE
+        }
         root.addView(button("CONNECT") {
             val id = apiId.text.toString().toIntOrNull()
             if (id == null || apiHash.text.isBlank()) Toast.makeText(this, "Enter API ID and hash", Toast.LENGTH_SHORT).show()
@@ -83,8 +87,8 @@ class TelegramActivity : Activity() {
         chatList.addView(label("CHANNELS (${chats.size}) · Select קונים באושר", 13f, accent))
         for (chat in chats) chatList.addView(button(chat.title) {
             getSharedPreferences("telegram_source", MODE_PRIVATE).edit().putLong("chat_id", chat.id).putString("chat_title", chat.title).apply()
-            TelegramClient.readHistory(chat.id)
             if (!MonitorControl.enabled(this)) MonitorControl.start(this)
+            TelegramClient.readHistory(chat.id)
             status.text = "Automatic monitoring: ${chat.title}"
         })
     }

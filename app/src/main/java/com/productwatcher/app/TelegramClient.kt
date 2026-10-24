@@ -3,12 +3,15 @@ package com.productwatcher.app
 import android.content.Context
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
+import java.util.concurrent.ConcurrentHashMap
+import android.os.Handler
+import android.os.Looper
 
-/** Local Telegram session. API credentials and TDLib database stay on the device. */
+/** One TDLib client shared by UI, foreground service and periodic catch-up worker. */
 object TelegramClient {
     private var client: Client? = null
     private var appContext: Context? = null
-    @Volatile var state: String = "Not connected"
+    @Volatile var state = "Not connected"
         private set
     @Volatile var ready = false
         private set
@@ -16,14 +19,16 @@ object TelegramClient {
     var onChats: ((List<TdApi.Chat>) -> Unit)? = null
     var onHistory: ((List<TdApi.Message>) -> Unit)? = null
     private val chats = linkedMapOf<Long, TdApi.Chat>()
+    private val downloads = ConcurrentHashMap<Int, MutableList<(TdApi.File?) -> Unit>>()
+    private val historyInFlight = ConcurrentHashMap.newKeySet<Long>()
 
-    fun start(context: Context, apiId: Int, apiHash: String) {
+    @Synchronized fun start(context: Context, apiId: Int, apiHash: String) {
         if (client != null) return
         appContext = context.applicationContext
         TelegramOfferScanner.init(context)
-        context.getSharedPreferences("telegram_auth", Context.MODE_PRIVATE).edit()
-            .putInt("api_id", apiId).putString("api_hash", apiHash).apply()
+        context.getSharedPreferences("telegram_auth", Context.MODE_PRIVATE).edit().putInt("api_id", apiId).putString("api_hash", apiHash).apply()
         state = "Connecting"
+        ready = false
         try {
             System.loadLibrary("tdjni")
             client = Client.create({ update ->
@@ -31,12 +36,12 @@ object TelegramClient {
                     is TdApi.UpdateAuthorizationState -> auth(update.authorizationState)
                     is TdApi.UpdateNewChat -> { synchronized(chats) { chats[update.chat.id] = update.chat }; onUpdate?.invoke() }
                     is TdApi.UpdateChatTitle -> { synchronized(chats) { chats[update.chatId]?.title = update.title }; onUpdate?.invoke() }
+                    is TdApi.UpdateFile -> completeDownload(update.file)
                     is TdApi.UpdateNewMessage -> {
                         val ctx = appContext
                         val selected = ctx?.getSharedPreferences("telegram_source", Context.MODE_PRIVATE)?.getLong("chat_id", 0L)
-                        if (ready && ctx != null && MonitorControl.enabled(ctx) && selected == update.message.chatId) {
+                        if (ready && ctx != null && MonitorControl.enabled(ctx) && selected == update.message.chatId)
                             TelegramOfferScanner.scan(update.message.chatId, listOf(update.message))
-                        }
                     }
                 }
             }, { error -> state = error.message ?: "TDLib error"; onUpdate?.invoke() }, null)
@@ -57,21 +62,14 @@ object TelegramClient {
                 state = "Initializing TDLib"
                 val ctx = appContext ?: return
                 val p = ctx.getSharedPreferences("telegram_auth", Context.MODE_PRIVATE)
-                val params = TdApi.SetTdlibParameters().apply {
+                send(TdApi.SetTdlibParameters().apply {
                     databaseDirectory = ctx.getDir("telegram_db", Context.MODE_PRIVATE).absolutePath
                     filesDirectory = ctx.getDir("telegram_files", Context.MODE_PRIVATE).absolutePath
-                    useFileDatabase = true
-                    useChatInfoDatabase = true
-                    useMessageDatabase = true
-                    useSecretChats = false
-                    apiId = p.getInt("api_id", 0)
-                    apiHash = p.getString("api_hash", "").orEmpty()
-                    systemLanguageCode = "en"
-                    deviceModel = android.os.Build.MODEL
-                    systemVersion = android.os.Build.VERSION.RELEASE
-                    applicationVersion = "0.3"
-                }
-                send(params)
+                    useFileDatabase = true; useChatInfoDatabase = true; useMessageDatabase = true; useSecretChats = false
+                    apiId = p.getInt("api_id", 0); apiHash = p.getString("api_hash", "").orEmpty()
+                    systemLanguageCode = "en"; deviceModel = android.os.Build.MODEL
+                    systemVersion = android.os.Build.VERSION.RELEASE; applicationVersion = "0.4"
+                })
             }
             is TdApi.AuthorizationStateWaitPhoneNumber -> state = "Enter phone number"
             is TdApi.AuthorizationStateWaitCode -> state = "Enter Telegram login code"
@@ -105,20 +103,31 @@ object TelegramClient {
         }
     }
 
+    /** DownloadFile can return before the download is finished. Wait for UpdateFile. */
     fun downloadPhoto(fileId: Int, callback: (TdApi.File?) -> Unit) {
-        send(TdApi.DownloadFile(fileId, 16, 0, 0, true)) { response ->
-            callback(response as? TdApi.File)
+        downloads.compute(fileId) { _, old -> (old ?: mutableListOf()).apply { add(callback) } }
+        // Fail a stalled transfer so the next scheduled catch-up can retry it.
+        Handler(Looper.getMainLooper()).postDelayed({ failDownload(fileId) }, 90_000L)
+        send(TdApi.DownloadFile(fileId, 16, 0, 0, false)) { response ->
+            when (response) {
+                is TdApi.File -> if (response.local.isDownloadingCompleted) completeDownload(response)
+                is TdApi.Error -> failDownload(fileId)
+            }
         }
     }
+    private fun completeDownload(file: TdApi.File) {
+        if (!file.local.isDownloadingCompleted) return
+        val callbacks = downloads.remove(file.id) ?: return
+        callbacks.forEach { it(file) }
+    }
+    private fun failDownload(fileId: Int) { downloads.remove(fileId)?.forEach { it(null) } }
 
     fun loadChats() {
         if (!ready) return
         send(TdApi.LoadChats(TdApi.ChatListMain(), 100)) {
-            val snapshot = synchronized(chats) { chats.values.filter { it.type is TdApi.ChatTypeSupergroup }.toList() }
-            onChats?.invoke(snapshot)
+            onChats?.invoke(listChats())
         }
     }
-
     fun listChats(): List<TdApi.Chat> = synchronized(chats) { chats.values.filter { it.type is TdApi.ChatTypeSupergroup }.toList() }
 
     fun scanSelectedChannel() {
@@ -127,19 +136,33 @@ object TelegramClient {
         if (ready && MonitorControl.enabled(ctx) && chatId != 0L) readHistory(chatId)
     }
 
+    /** Page backwards through recent history, not just one fixed batch of 100. */
     fun readHistory(chatId: Long) {
-        send(TdApi.GetChatHistory(chatId, 0, 0, 100, false)) { result ->
-            if (result is TdApi.Messages) {
-                val messages = result.messages.toList()
-                val ctx = appContext
-                val checkpoint = ctx?.getSharedPreferences("telegram_source", Context.MODE_PRIVATE)?.getLong("last_message_$chatId", 0L) ?: 0L
-                val fresh = messages.filter { it.id > checkpoint }.sortedBy { it.id }
-                if (fresh.isNotEmpty()) {
-                    TelegramOfferScanner.scan(chatId, fresh)
-                    ctx?.getSharedPreferences("telegram_source", Context.MODE_PRIVATE)?.edit()?.putLong("last_message_$chatId", fresh.maxOf { it.id })?.apply()
+        if (!ready || !historyInFlight.add(chatId)) return
+        val ctx = appContext ?: run { historyInFlight.remove(chatId); return }
+        val checkpoint = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).getLong("last_discovered_$chatId", 0L)
+        var newest = checkpoint
+        var pages = 0
+        fun page(from: Long) {
+            send(TdApi.GetChatHistory(chatId, from, 0, 100, false)) { result ->
+                if (result !is TdApi.Messages) { historyInFlight.remove(chatId); return@send }
+                val batch = result.messages.toList()
+                if (batch.isEmpty()) { historyInFlight.remove(chatId); return@send }
+                newest = maxOf(newest, batch.maxOf { it.id })
+                val fresh = if (pages == 0) batch else batch.filter { it.id > checkpoint }
+                if (fresh.isNotEmpty()) TelegramOfferScanner.scan(chatId, fresh.sortedBy { it.id })
+                onHistory?.invoke(batch)
+                pages++
+                val oldest = batch.minOf { it.id }
+                if (pages < 10 && batch.size >= 100 && oldest > checkpoint && oldest != from) page(oldest)
+                else {
+                    // Discovery cursor is NOT the processing checkpoint. Failed images remain retryable
+                    // because the scanner tracks completion per message, not only this cursor.
+                    ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).edit().putLong("last_discovered_$chatId", newest).apply()
+                    historyInFlight.remove(chatId)
                 }
-                onHistory?.invoke(messages)
             }
         }
+        page(0L)
     }
 }

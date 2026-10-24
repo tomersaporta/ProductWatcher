@@ -41,8 +41,14 @@ class TelegramMonitorService : Service() {
             return START_NOT_STICKY
         }
         val notification = notification()
-        if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        else startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= 29) startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            else startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Store.setTelegramStatus(this, "Live service blocked: ${e.message}; periodic catch-up remains enabled")
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         handler.removeCallbacks(refresh)
         handler.post(refresh)
         return START_STICKY
@@ -70,6 +76,13 @@ class TelegramMonitorService : Service() {
     }
 
     override fun onDestroy() { handler.removeCallbacks(refresh); super.onDestroy() }
+    // Android 15+ imposes a time budget on dataSync foreground services.
+    // Stop cleanly; WorkManager continues catch-up checks when permitted.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        handler.removeCallbacks(refresh)
+        Store.setTelegramStatus(this, "Live monitoring timed out; scheduled catch-up remains enabled")
+        stopSelf(startId)
+    }
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
