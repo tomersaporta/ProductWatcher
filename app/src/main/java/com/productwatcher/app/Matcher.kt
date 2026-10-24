@@ -1,38 +1,60 @@
 package com.productwatcher.app
 
+/** Model-aware matching. X60 Ultra must never be confused with X60 Pro/Max Ultra. */
 object Matcher {
-    private fun normalized(text: String): String = text.lowercase()
+    private fun normalized(value: String): String = value.lowercase()
         .replace(Regex("[‐‑‒–—−]"), "-")
+        .replace(Regex("(?i)\\bx\\s*6\\s*[o0]\\b"), "x60")
+        .replace(Regex("(?i)\\bu[l1i]tra\\b"), "ultra")
         .replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
 
-    /** Exact model sequence, allowing whitespace/punctuation between tokens.
-     * Excludes X60 Max Ultra, X60 Ultra, and X60 Pro Ultra 2. */
-    fun matches(text: String, product: String): Boolean {
-        val query = normalized(product).split(Regex("\\s+")).filter { it.isNotBlank() }
-        if (query.isEmpty()) return false
-        val hay = " ${normalized(text)} "
-        val phrase = query.joinToString(" ")
-        if (!hay.contains(" $phrase ")) return false
-        if (query.contains("x60") && query.contains("pro") && query.contains("ultra")) {
-            if (Regex("\\bx60\\s+(?:max|ultra)\\s+pro\\b").containsMatchIn(hay)) return false
+    // Handles X 60, X60Ultra, UltraComplete, and the OCR truncation 'Complet'.
+    private val modelPattern = Regex(
+        "(?<![\\p{L}\\p{N}])x\\s*(\\d)\\s*(\\d)\\s*(?:(pro|max)\\s*)?u[l1i]tra\\s*(complete|complet|pro|max|2)?(?![\\p{L}\\p{N}])"
+    )
+
+    data class Model(val number: String, val tier: String, val complete: Boolean, val text: String)
+
+    private fun models(text: String): List<Model> = modelPattern.findAll(normalized(text)).map { m ->
+        val prefix = m.groupValues[3]
+        val suffix = m.groupValues[4]
+        val tier = when {
+            suffix == "2" -> "v2"
+            prefix == "max" || suffix == "max" -> "max"
+            prefix == "pro" || suffix == "pro" -> "pro"
+            else -> "standard"
         }
-        return true
+        Model("x${m.groupValues[1]}${m.groupValues[2]}", tier, suffix.startsWith("complet"), m.value)
+    }.toList()
+
+    fun distinctModelCount(text: String): Int = models(text).map { it.number + ":" + it.tier }.distinct().size
+
+    fun matches(text: String, product: String): Boolean {
+        val requested = models(product).firstOrNull()
+        if (requested != null) {
+            return models(text).any { found ->
+                found.number == requested.number && found.tier == requested.tier &&
+                    (!requested.complete || found.complete)
+            }
+        }
+        // Other brands/products still use an exact, token-boundary phrase.
+        val phrase = normalized(product)
+        return phrase.isNotBlank() && " ${normalized(text)} ".contains(" $phrase ")
     }
 
+    fun evidence(text: String, product: String): String? = text.lineSequence()
+        .firstOrNull { matches(it, product) }?.trim()?.take(180)
+
+    /** Use only when there is exactly one plausible price. Multi-product photos require spatial extraction. */
     fun price(text: String): String? {
-        val number = "([0-9]{1,3}(?:[,\\.]\\d{3})+|[0-9]{3,6})"
-        val patterns = listOf(
-            Regex("(?:₪|ש[\\\"״']?ח)\\s*$number"),
-            Regex("$number\\s*(?:₪|ש[\\\"״']?ח)"),
-            Regex("(?:מחיר|price)\\s*[:：-]?\\s*₪?\\s*$number", RegexOption.IGNORE_CASE)
-        )
-        return patterns.firstNotNullOfOrNull { it.find(text)?.groupValues?.get(1) }?.let { "₪$it (unverified)" }
+        val prices = OfferExtractor.prices(text).distinct()
+        return if (prices.size == 1) "₪${prices.single()} (OCR, unverified)" else null
     }
 
     fun branch(text: String): String? {
         val patterns = listOf(
-            Regex("(?:סניף|באושר\\s*עד|אושר\\s*עד\\s*[-–:]|branch)\\s*[:：-]?\\s*([\\p{L}][\\p{L} \\-]{1,32})", RegexOption.IGNORE_CASE),
-            Regex("(?:סניף\\s+)([\\p{L}][\\p{L} \\-]{1,32})")
+            Regex("(?:סניף|branch)\\s*[:：-]?\\s*([\\p{L}][\\p{L} \\-]{1,32})", RegexOption.IGNORE_CASE),
+            Regex("(?:באושר\\s*עד|אושר\\s*עד\\s*[-–:])\\s*([\\p{L}][\\p{L} \\-]{1,32})", RegexOption.IGNORE_CASE)
         )
         return patterns.firstNotNullOfOrNull { it.find(text)?.groupValues?.getOrNull(1) }
             ?.lineSequence()?.firstOrNull()?.trim()?.take(35)

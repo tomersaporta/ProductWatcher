@@ -15,11 +15,13 @@ class TelegramCatchupWorker(ctx: Context, params: WorkerParameters) : CoroutineW
             if (TelegramClient.ready) {
                 TelegramClient.scanSelectedChannel()
                 // Keep the worker process alive while asynchronous TDLib/ML Kit work finishes.
-                delay(5000)
-                repeat(50) {
-                    if (!TelegramOfferScanner.hasPendingWork()) return Result.success()
+                delay(1500)
+                // Don't exit between historical pages while TDLib has a request in flight.
+                repeat(420) {
+                    if (!TelegramOfferScanner.hasPendingWork() && !TelegramClient.hasHistoryWork()) return Result.success()
                     delay(1000)
                 }
+                Store.setTelegramStatus(ctx, "Catch-up reached its time budget; remaining history will resume")
                 return Result.retry()
             }
             delay(1000)

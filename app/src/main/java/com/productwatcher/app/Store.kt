@@ -25,7 +25,13 @@ object Store {
         p.edit().putLong("scan_generation", scanGeneration(ctx) + 1L).apply()
         val source = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE)
         val edit = source.edit()
-        monitoredChannels(ctx).forEach { (id, _) -> edit.remove("last_discovered_$id") }
+        monitoredChannels(ctx).forEach { (id, _) ->
+            edit.putBoolean("history_pending_$id", true)
+                .putLong("history_cursor_$id", 0L)
+                .putLong("history_checked_$id", 0L)
+                .remove("catchup_cursor_$id")
+                .remove("catchup_target_$id")
+        }
         edit.apply()
         setTelegramStatus(ctx, "Watchlist changed · historical Telegram rescan requested")
     }
@@ -51,16 +57,24 @@ object Store {
         val prefix = productPrefix(product)
         val time = p.getLong(prefix + "last", 0L)
         val last = if (time == 0L) "Not checked yet" else DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM).format(Date(time))
+        val lastOffer = p.getString(prefix + "last_offer", null)
         return "Last activity: $last\n" +
             "Posts checked: ${p.getLong(prefix + "checked", 0L)} · Matches: ${p.getLong(prefix + "matches", 0L)} · Alerts: ${p.getLong(prefix + "alerts", 0L)}\n" +
-            "Status: ${p.getString(prefix + "state", "Waiting for Telegram scan")}" 
+            "Status: ${p.getString(prefix + "state", "Waiting for Telegram scan")}" +
+            (if (lastOffer != null) "\nLast match: $lastOffer" else "")
     }
     /** Per-channel telemetry; separate from the selected channel and image-folder legacy state. */
     @Synchronized fun recordChannel(ctx: Context, chatId: Long, title: String) {
         val p = prefs(ctx)
         val channels = runCatching { JSONObject(p.getString("monitored_channels", "{}") ?: "{}") }.getOrDefault(JSONObject())
+        val firstAdded = !channels.has(chatId.toString())
         channels.put(chatId.toString(), title)
         p.edit().putString("monitored_channels", channels.toString()).apply()
+        if (firstAdded) {
+            ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).edit()
+                .putBoolean("history_pending_$chatId", true)
+                .putLong("history_cursor_$chatId", 0L).apply()
+        }
     }
     fun monitoredChannels(ctx: Context): List<Pair<Long, String>> {
         val p = prefs(ctx)
@@ -84,15 +98,57 @@ object Store {
         if (increment != null) editor.putLong(prefix + increment, p.getLong(prefix + increment, 0L) + 1)
         editor.apply()
     }
+    @Synchronized fun failedMessages(ctx: Context, chatId: Long): List<Long> {
+        val raw = prefs(ctx).getString("retry_messages_$chatId", "[]") ?: "[]"
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).map { arr.getLong(it) }
+        }.getOrDefault(emptyList())
+    }
+    @Synchronized fun recordMessageOutcome(ctx: Context, chatId: Long, messageId: Long, success: Boolean) {
+        val old = failedMessages(ctx, chatId).toMutableList()
+        old.remove(messageId)
+        if (!success) old.add(messageId)
+        prefs(ctx).edit().putString("retry_messages_$chatId", JSONArray(old.takeLast(150)).toString()).apply()
+    }
+
+    /** OCR diagnostics contain only the last recognized excerpt and stay on device. */
+    fun recordOcrDiagnostic(ctx: Context, chatId: Long, messageId: Long, text: String) {
+        val compact = text.replace('\n', ' ')
+        val found = compact.indexOf("x60", ignoreCase = true)
+        val start = if (found >= 0) (found - 50).coerceAtLeast(0) else 0
+        prefs(ctx).edit().putString("channel_${chatId}_last_ocr",
+            "Post $messageId: " + compact.drop(start).take(260)).apply()
+    }
+
+    fun recordOffer(ctx: Context, offer: OfferMatch, chatId: Long, messageId: Long) {
+        val description = "${offer.price ?: "price not identified"} · post $messageId · ${offer.source}"
+        prefs(ctx).edit().putString(productPrefix(offer.product) + "last_offer", description).apply()
+    }
+
+    fun historyProgress(ctx: Context, chatId: Long): String {
+        val source = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE)
+        val count = source.getLong("history_checked_$chatId", 0L)
+        val gap = if (source.contains("catchup_cursor_$chatId"))
+            "\nMissed-post catch-up running (after background suspension)" else ""
+        return (if (source.getBoolean("history_pending_$chatId", false))
+            "Historical rescan in progress · $count posts visited; resumes automatically"
+        else if (source.contains("history_checked_$chatId"))
+            "Historical rescan finished · $count posts visited"
+        else "Historical scan not started") + gap
+    }
+
     fun channelReport(ctx: Context, chatId: Long): String {
         val p = prefs(ctx)
         val prefix = "channel_${chatId}_"
         val time = p.getLong(prefix + "last_run", 0L)
         val last = if (time == 0L) "Never" else DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM).format(Date(time))
-        return "Last run: $last\n" +
+        return "Last activity: $last\n" +
             "Posts: ${p.getLong(prefix + "posts", 0)} · Images: ${p.getLong(prefix + "images", 0)} · " +
             "OCR: ${p.getLong(prefix + "ocr", 0)} · Matches: ${p.getLong(prefix + "matches", 0)} · " +
             "Alerts: ${p.getLong(prefix + "alerts", 0)}\n" +
-            "Status: ${p.getString(prefix + "status", "Waiting for first scan")}" 
+            "Status: ${p.getString(prefix + "status", "Waiting for first scan")}\n" +
+            historyProgress(ctx, chatId) + "\n" +
+            "Last OCR: ${p.getString(prefix + "last_ocr", "No recognized text yet")}"
     }
 }

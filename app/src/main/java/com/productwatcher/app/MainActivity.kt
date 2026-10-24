@@ -8,6 +8,8 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.*
@@ -22,6 +24,19 @@ class MainActivity : ComponentActivity() {
     private val canvas = Color.rgb(245, 248, 252)
     private val blue = Color.rgb(19, 127, 165)
     private lateinit var body: LinearLayout
+    private val handler = Handler(Looper.getMainLooper())
+    private val productStatus = mutableMapOf<String, TextView>()
+    private val channelStatus = mutableMapOf<Long, TextView>()
+    private var monitorStatus: TextView? = null
+    private val liveUpdater = object : Runnable {
+        override fun run() {
+            productStatus.forEach { (product, view) -> view.text = Store.productReport(this@MainActivity, product) }
+            channelStatus.forEach { (id, view) -> view.text = Store.channelReport(this@MainActivity, id) }
+            monitorStatus?.text = if (MonitorControl.enabled(this@MainActivity))
+                "● Automatic monitoring enabled · ${TelegramClient.state}" else "● Monitoring stopped"
+            handler.postDelayed(this, 4000L)
+        }
+    }
 
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
@@ -37,7 +52,16 @@ class MainActivity : ComponentActivity() {
         render()
     }
 
-    override fun onResume() { super.onResume(); if (::body.isInitialized) render() }
+    override fun onResume() {
+        super.onResume()
+        if (::body.isInitialized) render()
+        handler.removeCallbacks(liveUpdater)
+        handler.post(liveUpdater)
+    }
+    override fun onPause() {
+        handler.removeCallbacks(liveUpdater)
+        super.onPause()
+    }
 
     private fun dp(n: Int) = (n * resources.displayMetrics.density + 0.5f).toInt()
     private fun bg(color: Int, radius: Int = 16) = GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
@@ -69,6 +93,8 @@ class MainActivity : ComponentActivity() {
         }, "Share report"))
     }
     private fun render() {
+        productStatus.clear()
+        channelStatus.clear()
         val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(canvas) }
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setBackgroundColor(navy)
@@ -127,6 +153,7 @@ class MainActivity : ComponentActivity() {
             val telemetry = label(Store.productReport(this, product), 12f, muted)
             telemetry.setPadding(dp(19), dp(3), dp(5), dp(9))
             watch.addView(telemetry)
+            productStatus[product] = telemetry
             watch.addView(pad(8))
         }
         val input = EditText(this).apply {
@@ -153,7 +180,9 @@ class MainActivity : ComponentActivity() {
         monitored.forEach { (id, name) ->
             source.addView(label(name, 17f, ink, true))
             source.addView(pad(5))
-            source.addView(label(Store.channelReport(this, id), 13f, muted))
+            val report = label(Store.channelReport(this, id), 13f, muted)
+            source.addView(report)
+            channelStatus[id] = report
             source.addView(pad(14))
         }
         source.addView(button("Manage channels") { startActivity(Intent(this, TelegramActivity::class.java)) })
@@ -161,7 +190,8 @@ class MainActivity : ComponentActivity() {
 
         heading("MONITOR ACTIVITY")
         val activity = card()
-        activity.addView(label(if (MonitorControl.enabled(this)) "● Automatic monitoring enabled" else "● Automatic monitoring stopped", 15f, ink, true))
+        monitorStatus = label(if (MonitorControl.enabled(this)) "● Automatic monitoring enabled" else "● Automatic monitoring stopped", 15f, ink, true)
+        activity.addView(monitorStatus)
         activity.addView(pad(8))
         activity.addView(label("New Telegram posts are processed automatically; no local folder scanning.", 13f, muted))
         activity.addView(pad(12))
@@ -175,6 +205,12 @@ class MainActivity : ComponentActivity() {
         activity.addView(deleteImages)
         activity.addView(label("Images are deleted only after processing finishes. Failed scans keep their files for retry; Telegram posts are never deleted.", 12f, muted))
         activity.addView(pad(12))
+        activity.addView(button("Rescan full Telegram history", false) {
+            Store.requestFullRescan(this)
+            TelegramClient.scanSelectedChannel()
+            render()
+        })
+        activity.addView(pad(9))
         activity.addView(button("Share status report", false) { share() })
         body.addView(activity)
         body.addView(label("Direct TDLib connection · On-device Telegram photo OCR · Background catch-up", 12f, muted))

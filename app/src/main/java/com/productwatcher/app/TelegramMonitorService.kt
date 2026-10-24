@@ -35,6 +35,11 @@ class TelegramMonitorService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP || !MonitorControl.enabled(this)) {
             MonitorControl.setEnabled(this, false)
+            if (intent?.action == ACTION_STOP) {
+                getSharedPreferences("telegram_source", MODE_PRIVATE).edit()
+                    .putBoolean("monitoring_user_stopped", true).apply()
+                androidx.work.WorkManager.getInstance(this).cancelUniqueWork("telegram_catchup")
+            }
             handler.removeCallbacks(refresh)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

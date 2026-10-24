@@ -21,6 +21,7 @@ object TelegramClient {
     private val chats = linkedMapOf<Long, TdApi.Chat>()
     private val downloads = ConcurrentHashMap<Int, MutableList<(TdApi.File?) -> Unit>>()
     private val historyInFlight = ConcurrentHashMap.newKeySet<Long>()
+    fun hasHistoryWork(): Boolean = historyInFlight.isNotEmpty()
 
     @Synchronized fun start(context: Context, apiId: Int, apiHash: String) {
         if (client != null) return
@@ -39,8 +40,8 @@ object TelegramClient {
                     is TdApi.UpdateFile -> completeDownload(update.file)
                     is TdApi.UpdateNewMessage -> {
                         val ctx = appContext
-                        val selected = ctx?.getSharedPreferences("telegram_source", Context.MODE_PRIVATE)?.getLong("chat_id", 0L)
-                        if (ready && ctx != null && MonitorControl.enabled(ctx) && selected == update.message.chatId)
+                        val watched = ctx?.let { Store.monitoredChannels(it).any { entry -> entry.first == update.message.chatId } } == true
+                        if (ready && ctx != null && MonitorControl.enabled(ctx) && watched)
                             TelegramOfferScanner.scan(update.message.chatId, listOf(update.message))
                     }
                 }
@@ -77,7 +78,7 @@ object TelegramClient {
             is TdApi.AuthorizationStateWaitEmailAddress -> state = "Enter recovery email"
             is TdApi.AuthorizationStateWaitEmailCode -> state = "Enter email code"
             is TdApi.AuthorizationStateWaitOtherDeviceConfirmation -> state = "Confirm on another device: ${s.link}"
-            is TdApi.AuthorizationStateReady -> { state = "Connected"; ready = true; loadChats(); scanSelectedChannel() }
+            is TdApi.AuthorizationStateReady -> { state = "Connected"; ready = true; appContext?.let { MonitorControl.ensureScheduled(it) }; loadChats(); scanSelectedChannel() }
             is TdApi.AuthorizationStateClosed -> { state = "Session closed"; ready = false; client = null }
             else -> state = s.javaClass.simpleName
         }
@@ -122,9 +123,13 @@ object TelegramClient {
     }
     private fun failDownload(fileId: Int) { downloads.remove(fileId)?.forEach { it(null) } }
 
-
+    /** Ask TDLib to remove only its cached local copy, never the Telegram message. */
     fun deleteDownloadedPhoto(fileId: Int) {
-        send(TdApi.DeleteFile(fileId))
+        send(TdApi.DeleteFile(fileId)) { response ->
+            if (response is TdApi.Error) appContext?.let {
+                Store.setTelegramStatus(it, "OCR complete; cache cleanup failed: ${response.message}")
+            }
+        }
     }
 
     fun loadChats() {
@@ -135,39 +140,153 @@ object TelegramClient {
     }
     fun listChats(): List<TdApi.Chat> = synchronized(chats) { chats.values.filter { it.type is TdApi.ChatTypeSupergroup }.toList() }
 
+    /** Historical backfill is persistent and bounded; fresh posts are always checked first. */
     fun scanSelectedChannel() {
         val ctx = appContext ?: return
-        val chatId = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).getLong("chat_id", 0L)
-        if (ready && MonitorControl.enabled(ctx) && chatId != 0L) readHistory(chatId)
+        if (!ready || !MonitorControl.enabled(ctx)) return
+        Store.monitoredChannels(ctx).forEach { (id, _) -> readHistory(id) }
     }
 
-    /** Page backwards through recent history, not just one fixed batch of 100. */
     fun readHistory(chatId: Long) {
         if (!ready || !historyInFlight.add(chatId)) return
         val ctx = appContext ?: run { historyInFlight.remove(chatId); return }
-        val checkpoint = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).getLong("last_discovered_$chatId", 0L)
-        var newest = checkpoint
-        var pages = 0
-        fun page(from: Long) {
-            send(TdApi.GetChatHistory(chatId, from, 0, 100, false)) { result ->
-                if (result !is TdApi.Messages) { historyInFlight.remove(chatId); return@send }
-                val batch = result.messages.toList()
-                if (batch.isEmpty()) { historyInFlight.remove(chatId); return@send }
-                newest = maxOf(newest, batch.maxOf { it.id })
-                val fresh = if (pages == 0) batch else batch.filter { it.id > checkpoint }
-                if (fresh.isNotEmpty()) TelegramOfferScanner.scan(chatId, fresh.sortedBy { it.id })
-                onHistory?.invoke(batch)
-                pages++
+        if (!MonitorControl.enabled(ctx) || Store.monitoredChannels(ctx).none { it.first == chatId }) {
+            historyInFlight.remove(chatId); return
+        }
+        val source = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE)
+        val currentGeneration = Store.scanGeneration(ctx)
+        val latestKey = "last_discovered_$chatId"
+        val historyKey = "history_pending_$chatId"
+        val cursorKey = "history_cursor_$chatId"
+        val countKey = "history_checked_$chatId"
+        val gapCursorKey = "catchup_cursor_$chatId"
+        val gapTargetKey = "catchup_target_$chatId"
+        Store.channelEvent(ctx, chatId, "Checking latest Telegram posts")
+        fun release() { historyInFlight.remove(chatId) }
+        fun request(from: Long, callback: (List<TdApi.Message>?) -> Unit) {
+            send(TdApi.GetChatHistory(chatId, from, 0, 100, false)) { obj ->
+                callback((obj as? TdApi.Messages)?.messages?.toList())
+            }
+        }
+        fun historical(from: Long, remainingPages: Int) {
+            if (!source.getBoolean(historyKey, false)) { release(); return }
+            request(from) { batch ->
+                if (batch == null) {
+                    Store.channelEvent(ctx, chatId, "History fetch failed; retry on next scheduled pass")
+                    release()
+                    return@request
+                }
+                if (batch.isEmpty()) {
+                    source.edit().putBoolean(historyKey, false).apply()
+                    Store.channelEvent(ctx, chatId, "Historical rescan completed")
+                    release()
+                    return@request
+                }
                 val oldest = batch.minOf { it.id }
-                if (pages < 10 && batch.size >= 100 && oldest > checkpoint && oldest != from) page(oldest)
-                else {
-                    // Discovery cursor is NOT the processing checkpoint. Failed images remain retryable
-                    // because the scanner tracks completion per message, not only this cursor.
-                    ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).edit().putLong("last_discovered_$chatId", newest).apply()
-                    historyInFlight.remove(chatId)
+                val count = source.getLong(countKey, 0L) + batch.size
+                onHistory?.invoke(batch)
+                TelegramOfferScanner.scan(chatId, batch.sortedBy { it.id }) {
+                    // Save progress after OCR / downloads resolve; failure IDs are retained for retry.
+                    if (Store.scanGeneration(ctx) != currentGeneration) {
+                        // Another product was added while this page was running; restart new generation at page one.
+                        release()
+                        return@scan
+                    }
+                    source.edit().putLong(cursorKey, oldest).putLong(countKey, count).apply()
+                    val end = batch.size < 100 || (from != 0L && oldest >= from)
+                    if (end) {
+                        source.edit().putBoolean(historyKey, false).apply()
+                        Store.channelEvent(ctx, chatId, "Historical rescan completed · $count posts visited")
+                        release()
+                    } else if (remainingPages > 1) {
+                        historical(oldest, remainingPages - 1)
+                    } else {
+                        Store.channelEvent(ctx, chatId, "Historical scan paused · $count visited; resumes next cycle")
+                        release()
+                    }
                 }
             }
         }
-        page(0L)
+        // Fill gaps if Android suspended the app long enough for more than 100 new posts.
+        fun catchupGap(from: Long, target: Long, remainingPages: Int) {
+            request(from) { batch ->
+                if (batch == null) {
+                    Store.channelEvent(ctx, chatId, "Gap catch-up fetch failed; will retry")
+                    release()
+                    return@request
+                }
+                if (batch.isEmpty()) {
+                    source.edit().remove(gapCursorKey).remove(gapTargetKey).apply()
+                    release()
+                    return@request
+                }
+                val newest = batch.maxOf { it.id }
+                val oldest = batch.minOf { it.id }
+                val newMessages = batch.filter { it.id > target }
+                onHistory?.invoke(batch)
+                TelegramOfferScanner.scan(chatId, newMessages.sortedBy { it.id }) {
+                    if (newMessages.isEmpty() || oldest <= target || batch.size < 100 ||
+                        (from != 0L && oldest >= from)) {
+                        source.edit().remove(gapCursorKey).remove(gapTargetKey).apply()
+                        Store.channelEvent(ctx, chatId, "Missed-post catch-up completed")
+                        release()
+                    } else {
+                        source.edit().putLong(gapCursorKey, oldest).apply()
+                        if (remainingPages > 1) catchupGap(oldest, target, remainingPages - 1)
+                        else {
+                            Store.channelEvent(ctx, chatId, "Missed-post catch-up paused; will resume")
+                            release()
+                        }
+                    }
+                }
+            }
+        }
+        fun retryFailures(then: () -> Unit) {
+            val retries = Store.failedMessages(ctx, chatId).take(15)
+            if (retries.isEmpty()) { then(); return }
+            val left = java.util.concurrent.atomic.AtomicInteger(retries.size)
+            for (id in retries) {
+                send(TdApi.GetMessage(chatId, id)) { obj ->
+                    if (obj is TdApi.Message) {
+                        TelegramOfferScanner.scan(chatId, listOf(obj)) {
+                            if (left.decrementAndGet() == 0) then()
+                        }
+                    } else {
+                        // Unavailable or removed message: don't endlessly retry.
+                        Store.recordMessageOutcome(ctx, chatId, id, true)
+                        if (left.decrementAndGet() == 0) then()
+                    }
+                }
+            }
+        }
+        request(0L) { latest ->
+            if (latest == null) {
+                Store.channelEvent(ctx, chatId, "Latest Telegram history unavailable; will retry")
+                release()
+                return@request
+            }
+            val previous = source.getLong(latestKey, 0L)
+            val newest = latest.maxOfOrNull { it.id } ?: previous
+            val oldest = latest.minOfOrNull { it.id } ?: previous
+            // Persist the catch-up boundary before advancing the latest checkpoint.
+            if (previous != 0L && oldest > previous && !source.contains(gapCursorKey)) {
+                source.edit().putLong(gapCursorKey, oldest).putLong(gapTargetKey, previous).apply()
+            }
+            onHistory?.invoke(latest)
+            TelegramOfferScanner.scan(chatId, latest.sortedBy { it.id }) {
+                source.edit().putLong(latestKey, maxOf(newest, previous)).apply()
+                retryFailures {
+                    if (source.getBoolean(historyKey, false)) {
+                        historical(source.getLong(cursorKey, 0L), 4)
+                    } else if (source.contains(gapCursorKey)) {
+                        catchupGap(source.getLong(gapCursorKey, 0L),
+                            source.getLong(gapTargetKey, previous), 4)
+                    } else {
+                        Store.channelEvent(ctx, chatId, "Latest scan completed · ${latest.size} posts checked")
+                        release()
+                    }
+                }
+            }
+        }
     }
 }

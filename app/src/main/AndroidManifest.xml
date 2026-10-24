@@ -8,7 +8,6 @@
         <receiver android:name=".MonitorBootReceiver" android:exported="false"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter></receiver>
         <service android:name=".TelegramMonitorService" android:exported="false" android:foregroundServiceType="dataSync" android:stopWithTask="false" />
         <activity android:name=".TelegramActivity" android:exported="false" />
-        <activity android:name=".ShareReceiverActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.SEND"/><category android:name="android.intent.category.DEFAULT"/><data android:mimeType="text/plain"/></intent-filter></activity>
         <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
     </application>
 </manifest>
