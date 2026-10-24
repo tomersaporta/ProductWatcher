@@ -24,6 +24,7 @@ object TelegramClient {
         prefs.edit().putInt("api_id", apiId).putString("api_hash", apiHash).apply()
         state = "Connecting"
         try {
+            System.loadLibrary("tdjni")
             client = Client.create({ update ->
                 when (update) {
                     is TdApi.UpdateAuthorizationState -> auth(update.authorizationState)
