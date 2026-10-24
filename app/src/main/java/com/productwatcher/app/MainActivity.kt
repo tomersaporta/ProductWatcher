@@ -95,7 +95,7 @@ class MainActivity : ComponentActivity() {
         }, "Share report with ChatGPT"))
     }
     private fun render() {
-        val scroll = ScrollView(this).apply { setBackgroundColor(bg); fillViewport = true }
+        val scroll = ScrollView(this).apply { setBackgroundColor(bg); isFillViewport = true }
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(26), dp(20), dp(32))
