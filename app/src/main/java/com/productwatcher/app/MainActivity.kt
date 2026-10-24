@@ -6,7 +6,6 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -15,11 +14,6 @@ import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
-import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
     private val navy = Color.rgb(12, 46, 78)
@@ -29,18 +23,6 @@ class MainActivity : ComponentActivity() {
     private val blue = Color.rgb(19, 127, 165)
     private lateinit var body: LinearLayout
 
-    private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
-        if (uri != null) {
-            try {
-                contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                Store.setFolder(this, uri.toString())
-                schedule()
-            } catch (e: Exception) {
-                Toast.makeText(this, "Folder permission failed: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-            render()
-        }
-    }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -50,7 +32,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        if (Store.folder(this) != null) schedule()
+        MonitorControl.ensureAutomatic(this)
         TelegramClient.resume(this)
         render()
     }
@@ -79,21 +61,9 @@ class MainActivity : ComponentActivity() {
         setOnClickListener { click() }
     }
     private fun heading(s: String) { body.addView(label(s, 12f, muted, true)); body.addView(pad(9)) }
-    private fun schedule() {
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            "scan_images", ExistingPeriodicWorkPolicy.KEEP,
-            PeriodicWorkRequestBuilder<ScanWorker>(15, TimeUnit.MINUTES).build()
-        )
-    }
-    private fun scanImages() {
-        if (Store.folder(this) == null) Toast.makeText(this, "Choose an image folder first", Toast.LENGTH_SHORT).show()
-        else {
-            WorkManager.getInstance(this).enqueue(OneTimeWorkRequestBuilder<ScanWorker>().build())
-            Toast.makeText(this, "Image scan started", Toast.LENGTH_SHORT).show()
-        }
-    }
     private fun share() {
-        val report = "ProductWatcher local report\nProducts: ${Store.products(this).joinToString()}\nImage scan: ${Store.status(this)}\nTelegram: ${TelegramClient.state}\nNo offer history included."
+        val report = "ProductWatcher Telegram report\nProducts: ${Store.products(this).joinToString()}\n" +
+            Store.monitoredChannels(this).joinToString("\n") { (id, name) -> "$name: ${Store.channelReport(this, id)}" }
         startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"; putExtra(Intent.EXTRA_TEXT, report)
         }, "Share report"))
@@ -154,6 +124,9 @@ class MainActivity : ComponentActivity() {
                 Store.setProducts(this, Store.products(this).filterNot { it == product }); render()
             })
             watch.addView(line)
+            val telemetry = label(Store.productReport(this, product), 12f, muted)
+            telemetry.setPadding(dp(19), dp(3), dp(5), dp(9))
+            watch.addView(telemetry)
             watch.addView(pad(8))
         }
         val input = EditText(this).apply {
@@ -165,39 +138,45 @@ class MainActivity : ComponentActivity() {
         watch.addView(button("+ Add product") {
             val product = input.text.toString().trim()
             if (product.isNotBlank() && product !in Store.products(this)) {
-                Store.setProducts(this, Store.products(this) + product); render()
+                Store.setProducts(this, Store.products(this) + product)
+                Store.requestFullRescan(this)
+                TelegramClient.scanSelectedChannel()
+                render()
             }
         })
         body.addView(watch)
 
-        heading("TELEGRAM SOURCE")
+        heading("MONITORED TELEGRAM CHANNELS")
         val source = card()
-        val sourcePrefs = getSharedPreferences("telegram_source", MODE_PRIVATE)
-        val selected = sourcePrefs.getString("chat_title", null)
-        source.addView(label(selected ?: "No channel selected", 18f, ink, true))
-        source.addView(pad(5))
-        source.addView(label(if (selected == null) "Select a subscribed channel to scan" else "Selected Telegram channel", 13f, muted))
-        source.addView(pad(12))
-        source.addView(button("Open channels") { startActivity(Intent(this, TelegramActivity::class.java)) })
+        val monitored = Store.monitoredChannels(this)
+        if (monitored.isEmpty()) source.addView(label("No monitored channels selected", 14f, muted))
+        monitored.forEach { (id, name) ->
+            source.addView(label(name, 17f, ink, true))
+            source.addView(pad(5))
+            source.addView(label(Store.channelReport(this, id), 13f, muted))
+            source.addView(pad(14))
+        }
+        source.addView(button("Manage channels") { startActivity(Intent(this, TelegramActivity::class.java)) })
         body.addView(source)
 
-        heading("ACTIVITY")
+        heading("MONITOR ACTIVITY")
         val activity = card()
-        activity.addView(label("Image scan: ${Store.status(this)}", 13f, ink))
-        activity.addView(pad(6))
-        activity.addView(label("Telegram scanning starts automatically for the selected channel.", 12f, muted))
-        activity.addView(pad(12))
-        activity.addView(button("Scan local images", false) { scanImages() })
+        activity.addView(label(if (MonitorControl.enabled(this)) "● Automatic monitoring enabled" else "● Automatic monitoring stopped", 15f, ink, true))
         activity.addView(pad(8))
+        activity.addView(label("New Telegram posts are processed automatically; no local folder scanning.", 13f, muted))
+        activity.addView(pad(12))
+        val deleteImages = CheckBox(this).apply {
+            text = "Delete downloaded Telegram images after OCR"
+            textSize = 14f
+            setTextColor(ink)
+            isChecked = Store.deleteTelegramImages(this@MainActivity)
+            setOnCheckedChangeListener { _, checked -> Store.setDeleteTelegramImages(this@MainActivity, checked) }
+        }
+        activity.addView(deleteImages)
+        activity.addView(label("Images are deleted only after processing finishes. Failed scans keep their files for retry; Telegram posts are never deleted.", 12f, muted))
+        activity.addView(pad(12))
         activity.addView(button("Share status report", false) { share() })
         body.addView(activity)
-
-        heading("OPTIONAL IMAGE SOURCE")
-        val folder = card()
-        folder.addView(label(if (Store.folder(this) == null) "No local image folder" else "Local image folder configured", 14f, ink, true))
-        folder.addView(pad(10))
-        folder.addView(button("Choose folder", false) { pickFolder.launch(null) })
-        body.addView(folder)
         body.addView(label("Direct TDLib connection · On-device Telegram photo OCR · Background catch-up", 12f, muted))
     }
 }

@@ -33,8 +33,10 @@ object TelegramOfferScanner {
         val selected = ctx.getSharedPreferences("telegram_source", Context.MODE_PRIVATE).getLong("chat_id", 0L)
         if (selected != chatId) return
         for (message in messages) {
-            val key = "tg_processed_${chatId}_${message.id}"
+            val key = "tg_processed_${Store.scanGeneration(ctx)}_${chatId}_${message.id}"
             if (Store.seen(ctx, key) || !inFlight.add(key)) continue
+            Store.channelEvent(ctx, chatId, "Checking post ${message.id}", "posts")
+            Store.products(ctx).forEach { Store.productEvent(ctx, it, "Checking Telegram post ${message.id}") }
             val caption = when (val body = message.content) {
                 is TdApi.MessageText -> body.text.text
                 is TdApi.MessagePhoto -> body.caption.text
@@ -48,6 +50,7 @@ object TelegramOfferScanner {
             val best = photo.photo.sizes.filter { it.photo.id > 0 }
                 .maxByOrNull { it.width.toLong() * it.height }
             if (best == null) { inFlight.remove(key); continue }
+            Store.channelEvent(ctx, chatId, "Downloading image from post ${message.id}", "images")
             pending.incrementAndGet()
             status(ctx, "Processing ${pending.get()} Telegram image(s)…")
             TelegramClient.downloadPhoto(best.photo.id) { file ->
@@ -57,17 +60,25 @@ object TelegramOfferScanner {
                     try {
                         val image = InputImage.fromFilePath(ctx, android.net.Uri.fromFile(File(path)))
                         recognizer.process(image)
-                            .addOnSuccessListener { result -> finish(ctx, key, chatId, message.id, "$caption\n${result.text}", true) }
-                            .addOnFailureListener { e -> finish(ctx, key, chatId, message.id, "OCR failed: ${e.message}", false) }
-                            .addOnCompleteListener { recognizer.close(); pending.decrementAndGet() }
+                            .addOnSuccessListener { result ->
+                                Store.channelEvent(ctx, chatId, "OCR completed for post ${message.id}", "ocr")
+                                pending.decrementAndGet()
+                                finish(ctx, key, chatId, message.id, "$caption\n${result.text}", true)
+                                if (Store.deleteTelegramImages(ctx)) TelegramClient.deleteDownloadedPhoto(best.photo.id)
+                            }
+                            .addOnFailureListener { e ->
+                                pending.decrementAndGet()
+                                finish(ctx, key, chatId, message.id, "OCR failed: ${e.message}", false)
+                            }
+                            .addOnCompleteListener { recognizer.close() }
                     } catch (e: Exception) {
                         recognizer.close()
-                        finish(ctx, key, chatId, message.id, "Image error: ${e.message}", false)
                         pending.decrementAndGet()
+                        finish(ctx, key, chatId, message.id, "Image error: ${e.message}", false)
                     }
                 } else {
-                    finish(ctx, key, chatId, message.id, "Telegram photo download failed", false)
                     pending.decrementAndGet()
+                    finish(ctx, key, chatId, message.id, "Telegram photo download failed", false)
                 }
             }
         }
@@ -76,12 +87,19 @@ object TelegramOfferScanner {
     private fun finish(ctx: Context, key: String, chatId: Long, messageId: Long, text: String, success: Boolean) {
         try {
             if (success) {
-                val matches = Store.products(ctx).filter { Matcher.matches(text, it) }
+                val products = Store.products(ctx)
+                val matches = products.filter { Matcher.matches(text, it) }
+                products.forEach { product ->
+                    Store.productEvent(ctx, product,
+                        if (product in matches) "Match in post $messageId" else "Checked post $messageId · no match",
+                        checked = true, matched = product in matches)
+                }
                 matches.forEach { product ->
                     val offerKey = "offer_${chatId}_${messageId}_${product.hashCode()}"
                     if (!Store.seen(ctx, offerKey)) {
                         val price = Matcher.price(text) ?: "Price not identified"
                         val branch = Matcher.branch(text) ?: "Branch not identified"
+                        Store.channelEvent(ctx, chatId, "Matched $product · $price · $branch", "matches")
                         notifyOffer(ctx, product, price, branch, chatId, messageId)
                         Store.markSeen(ctx, offerKey)
                         status(ctx, "Match: $product · $price · $branch")
@@ -89,7 +107,11 @@ object TelegramOfferScanner {
                 }
                 Store.markSeen(ctx, key)
                 if (matches.isEmpty()) status(ctx, "Checked Telegram post $messageId · ${pending.get()} images pending")
-            } else status(ctx, text + " · will retry on next catch-up")
+            } else {
+                Store.products(ctx).forEach { Store.productEvent(ctx, it, "Post $messageId failed · retry pending: ${text.take(90)}") }
+                Store.channelEvent(ctx, chatId, text + " · retry scheduled")
+                status(ctx, text + " · will retry on next catch-up")
+            }
         } finally { inFlight.remove(key) }
     }
 
@@ -119,6 +141,10 @@ object TelegramOfferScanner {
             .setContentText(detail)
             .setStyle(NotificationCompat.BigTextStyle().bigText("$detail\nTelegram post $messageId · Price and branch unverified"))
             .setContentIntent(pendingIntent).setAutoCancel(true).build()
-        try { manager.notify(notificationId, notification) } catch (_: SecurityException) { }
+        try {
+            manager.notify(notificationId, notification)
+            Store.channelEvent(ctx, chatId, "Notification sent: $product", "alerts")
+            Store.productEvent(ctx, product, "Alert sent for post $messageId · $price · $branch", alerted = true)
+        } catch (_: SecurityException) { Store.channelEvent(ctx, chatId, "Notification permission denied") }
     }
 }
