@@ -106,7 +106,7 @@ object TelegramClient {
     fun listChats(): List<TdApi.Chat> = synchronized(chats) { chats.values.filter { it.type is TdApi.ChatTypeSupergroup }.toList() }
 
     fun readHistory(chatId: Long) {
-        send(TdApi.GetChatHistory(chatId, 0, 0, 0, 100, false)) { result ->
+        send(TdApi.GetChatHistory(chatId, 0, 0, 100, false)) { result ->
             if (result is TdApi.Messages) onHistory?.invoke(result.messages.toList())
         }
     }
