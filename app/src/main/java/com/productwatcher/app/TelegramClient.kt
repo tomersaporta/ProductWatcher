@@ -51,6 +51,7 @@ object TelegramClient {
 
     fun resume(context: Context) {
         TelegramOfferScanner.init(context)
+        Store.ensureStructuredOfferBackfill(context)
         val prefs = context.getSharedPreferences("telegram_auth", Context.MODE_PRIVATE)
         val id = prefs.getInt("api_id", 0)
         val hash = prefs.getString("api_hash", "").orEmpty()
@@ -69,7 +70,7 @@ object TelegramClient {
                     useFileDatabase = true; useChatInfoDatabase = true; useMessageDatabase = true; useSecretChats = false
                     apiId = p.getInt("api_id", 0); apiHash = p.getString("api_hash", "").orEmpty()
                     systemLanguageCode = "en"; deviceModel = android.os.Build.MODEL
-                    systemVersion = android.os.Build.VERSION.RELEASE; applicationVersion = "0.4"
+                    systemVersion = android.os.Build.VERSION.RELEASE; applicationVersion = "0.5"
                 })
             }
             is TdApi.AuthorizationStateWaitPhoneNumber -> state = "Enter phone number"
@@ -102,6 +103,20 @@ object TelegramClient {
             }
             callback?.invoke(response)
         }
+    }
+
+    /** Ask TDLib for the canonical public/private link instead of guessing channel/message IDs. */
+    fun messageLink(chatId: Long, messageId: Long, callback: (String?) -> Unit) {
+        if (client == null) { callback(null); return }
+        send(TdApi.GetMessageLink().apply {
+            this.chatId = chatId
+            this.messageId = messageId
+            mediaTimestamp = 0
+            checklistTaskId = 0
+            pollOptionId = ""
+            forAlbum = false
+            inMessageThread = false
+        }) { response -> callback((response as? TdApi.MessageLink)?.link?.takeIf { it.isNotBlank() }) }
     }
 
     /** DownloadFile can return before the download is finished. Wait for UpdateFile. */

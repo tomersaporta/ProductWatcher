@@ -16,6 +16,8 @@ import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import java.text.DateFormat
+import java.util.Date
 
 class MainActivity : ComponentActivity() {
     private val navy = Color.rgb(12, 46, 78)
@@ -28,8 +30,15 @@ class MainActivity : ComponentActivity() {
     private val productStatus = mutableMapOf<String, TextView>()
     private val channelStatus = mutableMapOf<Long, TextView>()
     private var monitorStatus: TextView? = null
+    private var renderedOfferFingerprint = ""
     private val liveUpdater = object : Runnable {
         override fun run() {
+            val offerFingerprint = Store.foundOffers(this@MainActivity).joinToString("|") { it.id + it.messageLink }
+            if (offerFingerprint != renderedOfferFingerprint) {
+                render()
+                handler.postDelayed(this, 4000L)
+                return
+            }
             productStatus.forEach { (product, view) -> view.text = Store.productReport(this@MainActivity, product) }
             channelStatus.forEach { (id, view) -> view.text = Store.channelReport(this@MainActivity, id) }
             monitorStatus?.text = if (MonitorControl.enabled(this@MainActivity))
@@ -58,6 +67,11 @@ class MainActivity : ComponentActivity() {
         handler.removeCallbacks(liveUpdater)
         handler.post(liveUpdater)
     }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        render()
+    }
     override fun onPause() {
         handler.removeCallbacks(liveUpdater)
         super.onPause()
@@ -85,6 +99,12 @@ class MainActivity : ComponentActivity() {
         setOnClickListener { click() }
     }
     private fun heading(s: String) { body.addView(label(s, 12f, muted, true)); body.addView(pad(9)) }
+    private fun formattedTime(value: Long): String = if (value <= 0L) "Unknown" else
+        DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM).format(Date(value))
+    private fun openTelegram(link: String) {
+        try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(link))) }
+        catch (_: Exception) { Toast.makeText(this, "Telegram could not open this post", Toast.LENGTH_LONG).show() }
+    }
     private fun share() {
         val report = "ProductWatcher Telegram report\nProducts: ${Store.products(this).joinToString()}\n" +
             Store.monitoredChannels(this).joinToString("\n") { (id, name) -> "$name: ${Store.channelReport(this, id)}" }
@@ -137,6 +157,51 @@ class MainActivity : ComponentActivity() {
             startActivity(Intent(this, TelegramActivity::class.java))
         })
         body.addView(connection)
+
+        heading("FOUND OFFERS")
+        val focusedOffer = intent?.getStringExtra("found_offer_id")
+        val offers = Store.foundOffers(this).let { list ->
+            if (focusedOffer == null) list else list.sortedByDescending { it.id == focusedOffer }
+        }
+        renderedOfferFingerprint = offers.joinToString("|") { it.id + it.messageLink }
+        if (offers.isEmpty()) {
+            val empty = card()
+            empty.addView(label("No matching offers found yet", 17f, ink, true))
+            empty.addView(pad(5))
+            empty.addView(label("Matches from monitored Telegram posts will appear here and remain in history.", 13f, muted))
+            body.addView(empty)
+        } else {
+            body.addView(label("${offers.size} saved match${if (offers.size == 1) "" else "es"} · newest first", 13f, muted))
+            body.addView(pad(9))
+            offers.forEach { offer ->
+                val found = card().apply {
+                    background = bg(if (offer.id == focusedOffer) Color.rgb(229, 248, 255) else Color.WHITE)
+                }
+                found.addView(label(offer.product, 20f, navy, true))
+                found.addView(pad(6))
+                found.addView(label(offer.price, 19f, Color.rgb(7, 112, 80), true))
+                found.addView(pad(5))
+                found.addView(label("UNVERIFIED · OCR-derived price", 12f, Color.rgb(166, 82, 20), true))
+                found.addView(pad(11))
+                found.addView(label("Branch: ${offer.branch}", 14f, ink))
+                found.addView(label("Telegram channel: ${offer.channel}", 14f, ink))
+                found.addView(label("Original post: ${formattedTime(offer.postTime)}", 13f, muted))
+                found.addView(label("Detected: ${formattedTime(offer.detectedTime)}", 13f, muted))
+                found.addView(pad(9))
+                found.addView(label("Confidence: ${offer.confidence}", 13f, ink, true))
+                found.addView(label("Method: ${offer.source}", 12f, muted))
+                found.addView(pad(8))
+                found.addView(label("OCR evidence", 12f, muted, true))
+                found.addView(label(offer.evidence, 14f, ink))
+                found.addView(pad(12))
+                if (offer.messageLink.isNotBlank()) {
+                    found.addView(button("View source photo / post in Telegram") { openTelegram(offer.messageLink) })
+                } else {
+                    found.addView(label("Telegram link is still being resolved; tap Refresh shortly.", 12f, muted))
+                }
+                body.addView(found)
+            }
+        }
 
         heading("WATCHING")
         val watch = card()

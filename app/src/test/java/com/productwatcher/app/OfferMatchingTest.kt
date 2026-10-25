@@ -19,6 +19,9 @@ class OfferMatchingTest {
         assertTrue(Matcher.matches("Dreame X60 Pro Ultra Complete", "X60 Pro Ultra"))
         assertFalse(Matcher.matches("Dreame X60 Ultra Complete", "X60 Pro Ultra"))
         assertFalse(Matcher.matches("Dreame X60 Max Ultra", "X60 Pro Ultra"))
+        assertFalse(Matcher.matches("Dreame X60 Pro Ultra", "X60 Ultra Complete"))
+        assertFalse(Matcher.matches("Dreame X60 Ultra Complete", "X60 Pro Ultra Complete"))
+        assertTrue(Matcher.matches("Dreame X60 Pro Ultra Complete", "X60 Pro Ultra Complete"))
     }
 
     @Test fun priceTagsUseLocationNotFirstPrice() {
@@ -33,8 +36,35 @@ class OfferMatchingTest {
         val found = OfferExtractor.extract(lines, listOf("Dreame X60 Ultra", "Dreame X60 Pro Ultra", "X50 Ultra", "X40 Ultra"))
         assertEquals(3, found.size)
         assertTrue(found.single { it.product == "Dreame X60 Ultra" }.price!!.contains("3799"))
+        assertTrue(found.single { it.product == "Dreame X60 Ultra" }.evidence.contains("3799"))
         assertTrue(found.single { it.product == "X50 Ultra" }.price!!.contains("2450"))
         assertTrue(found.single { it.product == "X40 Ultra" }.price!!.contains("1790"))
+        assertTrue(found.all { !it.priceVerified })
+        assertTrue(found.all { it.price?.endsWith("(OCR, unverified)") == true })
         assertNull(OfferExtractor.extract(lines.filterNot { it.text == "3799" }, listOf("X60 Ultra")).single().price)
+    }
+
+    @Test fun textOnlyOfferIsStoredAsUnverifiedOcr() {
+        val found = OfferExtractor.extract(
+            emptyList(),
+            listOf("Dreame X60 Pro Ultra", "Dreame X60 Ultra Complete"),
+            "מבצע Dreame X60 Pro Ultra במחיר 4399"
+        )
+        assertEquals(1, found.size)
+        assertEquals("Dreame X60 Pro Ultra", found.single().product)
+        assertEquals("₪4399 (OCR, unverified)", found.single().price)
+        assertFalse(found.single().priceVerified)
+        assertTrue(found.single().evidence.contains("X60 Pro Ultra"))
+    }
+
+    @Test fun offerIdentityIsStableAcrossRescansButKeepsVariantsSeparate() {
+        assertEquals(
+            OfferIdentity.key(-100123L, 456L, "Dreame X60 Pro Ultra"),
+            OfferIdentity.key(-100123L, 456L, "  dreame x60 PRO ultra ")
+        )
+        assertNotEquals(
+            OfferIdentity.key(-100123L, 456L, "Dreame X60 Pro Ultra"),
+            OfferIdentity.key(-100123L, 456L, "Dreame X60 Ultra Complete")
+        )
     }
 }

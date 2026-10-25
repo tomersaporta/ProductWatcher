@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -79,14 +80,15 @@ object TelegramOfferScanner {
             }
             val photo = message.content as? TdApi.MessagePhoto
             if (photo == null) {
-                completed(ctx, key, chatId, message.id, caption, emptyList(), true)
+                completed(ctx, key, chatId, message, caption,
+                    OfferExtractor.extract(emptyList(), Store.products(ctx), caption), true)
                 itemFinished(key)
                 continue
             }
             val best = photo.photo.sizes.filter { it.photo.id > 0 }
                 .maxByOrNull { it.width.toLong() * it.height }
             if (best == null) {
-                completed(ctx, key, chatId, message.id, "No downloadable Telegram photo size", emptyList(), false)
+                completed(ctx, key, chatId, message, "No downloadable Telegram photo size", emptyList(), false)
                 itemFinished(key)
                 continue
             }
@@ -97,7 +99,7 @@ object TelegramOfferScanner {
                 TelegramClient.downloadPhoto(best.photo.id) { file ->
                     val path = file?.local?.path.orEmpty()
                     if (file?.local?.isDownloadingCompleted != true || path.isBlank() || !File(path).isFile) {
-                        completed(ctx, key, chatId, message.id, "Telegram photo download failed; will retry", emptyList(), false)
+                        completed(ctx, key, chatId, message, "Telegram photo download failed; will retry", emptyList(), false)
                         pending.decrementAndGet()
                         itemFinished(key)
                         releasePhotoSlot()
@@ -116,15 +118,15 @@ object TelegramOfferScanner {
                                     Store.recordOcrDiagnostic(ctx, chatId, message.id, result.text)
                                     // Use position-based product/price linking, never first-price-in-photo.
                                     if (result.text.isBlank() && Store.products(ctx).none { Matcher.matches(caption, it) }) {
-                                        completed(ctx, key, chatId, message.id, "OCR returned no text; retry scheduled", emptyList(), false)
+                                        completed(ctx, key, chatId, message, "OCR returned no text; retry scheduled", emptyList(), false)
                                     } else {
-                                        completed(ctx, key, chatId, message.id, "$caption\n${result.text}",
+                                        completed(ctx, key, chatId, message, "$caption\n${result.text}",
                                             OfferExtractor.extract(lines, Store.products(ctx), caption), true)
                                         if (Store.deleteTelegramImages(ctx)) TelegramClient.deleteDownloadedPhoto(best.photo.id)
                                     }
                                 }
                                 .addOnFailureListener { e ->
-                                    completed(ctx, key, chatId, message.id, "OCR failed: ${e.message}", emptyList(), false)
+                                    completed(ctx, key, chatId, message, "OCR failed: ${e.message}", emptyList(), false)
                                 }
                                 .addOnCompleteListener {
                                     recognizer.close()
@@ -134,7 +136,7 @@ object TelegramOfferScanner {
                                 }
                         } catch (e: Exception) {
                             recognizer.close()
-                            completed(ctx, key, chatId, message.id, "Image error: ${e.message}", emptyList(), false)
+                            completed(ctx, key, chatId, message, "Image error: ${e.message}", emptyList(), false)
                             pending.decrementAndGet()
                             itemFinished(key)
                             releasePhotoSlot()
@@ -145,8 +147,9 @@ object TelegramOfferScanner {
         }
     }
 
-    private fun completed(ctx: Context, key: String, chatId: Long, messageId: Long,
+    private fun completed(ctx: Context, key: String, chatId: Long, message: TdApi.Message,
                           ocr: String, offers: List<OfferMatch>, success: Boolean) {
+        val messageId = message.id
         Store.recordMessageOutcome(ctx, chatId, messageId, success)
         if (!success) {
             Store.products(ctx).forEach { Store.productEvent(ctx, it, "Post $messageId failed · retry needed") }
@@ -155,25 +158,33 @@ object TelegramOfferScanner {
             return // Never mark a failed message processed.
         }
         val products = Store.products(ctx)
-        val byName = offers.associateBy { it.product }
+        val branch = Matcher.branch(ocr) ?: "Branch not identified"
+        val channel = Store.monitoredChannels(ctx).firstOrNull { it.first == chatId }?.second ?: "Telegram channel"
+        val saved = offers.map { offer ->
+            Store.recordOffer(ctx, offer, chatId, messageId, message.date.toLong() * 1000L, branch, channel)
+        }
+        val byName = saved.associateBy { it.offer.product }
         products.forEach { product ->
             val match = byName[product]
             Store.productEvent(ctx, product,
-                if (match != null) "Found in post $messageId · ${match.price ?: "price uncertain"}"
+                if (match != null) "Found in post $messageId · ${match.offer.price}"
                 else "Checked post $messageId · no match",
-                checked = true, matched = match != null)
+                checked = true, matched = match?.inserted == true)
         }
-        for (offer in offers) {
-            val offerKey = "offer_${chatId}_${messageId}_${offer.product.hashCode()}"
-            Store.recordOffer(ctx, offer, chatId, messageId)
-            if (Store.seen(ctx, offerKey)) continue
-            val branch = Matcher.branch(ocr) ?: "Branch not identified"
-            Store.channelEvent(ctx, chatId, "Matched ${offer.product} · ${offer.price ?: "price unknown"} · $branch", "matches")
-            if (notifyOffer(ctx, offer.product, offer.price ?: "Price not identified", branch, chatId, messageId)) {
-                Store.markSeen(ctx, offerKey)
-                Store.productEvent(ctx, offer.product, "Alert sent · ${offer.price ?: "price uncertain"}", alerted = true)
+        saved.filter { it.inserted }.forEach {
+            Store.channelEvent(ctx, chatId, "Matched ${it.offer.product} · ${it.offer.price} · $branch", "matches")
+        }
+        if (saved.isNotEmpty()) TelegramClient.messageLink(chatId, messageId) { link ->
+            for (result in saved) {
+                val record = if (link != null) Store.updateOfferLink(ctx, result.offer.id, link) ?: result.offer else result.offer
+                val offerKey = "offer_${chatId}_${messageId}_${record.product.hashCode()}"
+                if (!Store.seen(ctx, offerKey) && notifyOffer(ctx, record)) {
+                    Store.markSeen(ctx, offerKey)
+                    Store.productEvent(ctx, record.product, "Alert sent · ${record.price}", alerted = true)
+                }
+                status(ctx, "Match: ${record.product} · ${record.price}")
             }
-            status(ctx, "Match: ${offer.product} · ${offer.price ?: "price uncertain"}")
+            onStatus?.invoke()
         }
         Store.markSeen(ctx, key)
         if (offers.isEmpty()) status(ctx, "Checked post $messageId · ${pending.get()} photos pending")
@@ -184,32 +195,41 @@ object TelegramOfferScanner {
         onStatus?.invoke()
     }
 
-    private fun notifyOffer(ctx: Context, product: String, price: String, branch: String, chatId: Long, messageId: Long): Boolean {
+    private fun notifyOffer(ctx: Context, offer: FoundOffer): Boolean {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            status(ctx, "Found $product, but notification permission is missing")
+            status(ctx, "Found ${offer.product}, but notification permission is missing")
             return false
         }
         return try {
             val manager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             manager.createNotificationChannel(NotificationChannel("telegram_offers", "Telegram product offers", NotificationManager.IMPORTANCE_HIGH))
-            val intent = Intent(ctx, TelegramActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-                putExtra("offer_chat_id", chatId)
-                putExtra("offer_message_id", messageId)
+            val intent = Intent(ctx, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra("found_offer_id", offer.id)
             }
-            val notificationId = (chatId xor messageId xor product.hashCode().toLong()).toInt()
+            val notificationId = offer.id.hashCode()
             val pendingIntent = PendingIntent.getActivity(ctx, notificationId, intent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-            manager.notify(notificationId, NotificationCompat.Builder(ctx, "telegram_offers")
+            val notification = NotificationCompat.Builder(ctx, "telegram_offers")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle("Found: $product")
-                .setContentText("$price · $branch")
-                .setStyle(NotificationCompat.BigTextStyle().bigText("$price · $branch\nTelegram post $messageId · OCR details unverified"))
-                .setContentIntent(pendingIntent).setAutoCancel(true).build())
-            Store.channelEvent(ctx, chatId, "Notification sent for $product", "alerts")
+                .setContentTitle("Found: ${offer.product}")
+                .setContentText("${offer.price} · ${offer.branch}")
+                .setStyle(NotificationCompat.BigTextStyle().bigText(
+                    "${offer.price} · ${offer.branch}\n${offer.channel} · OCR price is unverified"))
+                .setContentIntent(pendingIntent).setAutoCancel(true)
+            if (offer.messageLink.isNotBlank()) {
+                val telegramIntent = Intent(Intent.ACTION_VIEW, Uri.parse(offer.messageLink)).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                val telegramPending = PendingIntent.getActivity(ctx, notificationId xor 0x54e1, telegramIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+                notification.addAction(android.R.drawable.ic_menu_view, "Open Telegram post", telegramPending)
+            }
+            manager.notify(notificationId, notification.build())
+            Store.channelEvent(ctx, offer.chatId, "Notification sent for ${offer.product}", "alerts")
             true
         } catch (e: Exception) {
-            Store.channelEvent(ctx, chatId, "Notification failed: ${e.message}")
+            Store.channelEvent(ctx, offer.chatId, "Notification failed: ${e.message}")
             false
         }
     }

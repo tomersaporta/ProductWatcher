@@ -7,7 +7,21 @@ data class OcrLine(val text: String, val left: Int, val top: Int, val right: Int
     val cx: Double get() = (left + right) / 2.0
 }
 
-data class OfferMatch(val product: String, val price: String?, val evidence: String, val source: String)
+data class OfferMatch(
+    val product: String,
+    val price: String?,
+    val evidence: String,
+    val source: String,
+    val confidence: String,
+    /** OCR can suggest a price, but only a human checking the Telegram post can verify it. */
+    val priceVerified: Boolean = false
+)
+
+/** Stable across rescans so one Telegram post/product pair produces one stored card. */
+object OfferIdentity {
+    fun key(chatId: Long, messageId: Long, product: String): String =
+        "$chatId:$messageId:${product.trim().lowercase()}"
+}
 
 /** Associates a tag with the nearest model printed ABOVE it and in the same image column. */
 object OfferExtractor {
@@ -48,7 +62,7 @@ object OfferExtractor {
                     val dx = abs(tag.cx - anchor.cx) / width
                     if (dx > 0.18) return@priceCandidate null // Different display column.
                     val dy = (tag.top - anchor.bottom).coerceAtLeast(0) / height.toDouble()
-                    Triple(dx * 5.0 + dy * 0.8, price, anchor.text)
+                    Triple(dx * 5.0 + dy * 0.8, price, "${anchor.text} · ${tag.text}")
                 }
             }.minByOrNull { it.first }
             val price = when {
@@ -59,8 +73,20 @@ object OfferExtractor {
                 Matcher.price(caption) != null && prices(caption).size == 1 && tags.isEmpty() -> Matcher.price(caption)
                 else -> null
             }
-            OfferMatch(product, price, chosen?.third ?: anchors.firstOrNull()?.text ?: Matcher.evidence(fullText, product).orEmpty(),
-                if (chosen != null) "spatial OCR" else "text OCR")
+            val source = if (chosen != null) "spatial OCR" else "text OCR"
+            val confidence = when {
+                chosen != null && price != null -> "High model match · medium price association"
+                price != null -> "Medium model/price association"
+                else -> "Model match · price unavailable"
+            }
+            OfferMatch(
+                product = product,
+                price = price,
+                evidence = chosen?.third ?: anchors.firstOrNull()?.text ?: Matcher.evidence(fullText, product).orEmpty(),
+                source = source,
+                confidence = confidence,
+                priceVerified = false
+            )
         }
     }
 }

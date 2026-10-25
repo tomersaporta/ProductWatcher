@@ -6,6 +6,25 @@ import org.json.JSONObject
 import java.text.DateFormat
 import java.util.Date
 
+data class FoundOffer(
+    val id: String,
+    val product: String,
+    val price: String,
+    val branch: String,
+    val channel: String,
+    val chatId: Long,
+    val messageId: Long,
+    val postTime: Long,
+    val detectedTime: Long,
+    val evidence: String,
+    val source: String,
+    val confidence: String,
+    val verified: Boolean,
+    val messageLink: String
+)
+
+data class FoundOfferSave(val offer: FoundOffer, val inserted: Boolean)
+
 object Store {
     private const val PREF = "product_watcher"
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -19,6 +38,13 @@ object Store {
     fun deleteTelegramImages(ctx: Context): Boolean = prefs(ctx).getBoolean("delete_telegram_images", true)
     fun setDeleteTelegramImages(ctx: Context, enabled: Boolean) = prefs(ctx).edit().putBoolean("delete_telegram_images", enabled).apply()
     fun scanGeneration(ctx: Context): Long = prefs(ctx).getLong("scan_generation", 0L)
+    /** One-time, non-destructive backfill for installs upgraded from pre-structured offer storage. */
+    @Synchronized fun ensureStructuredOfferBackfill(ctx: Context) {
+        val p = prefs(ctx)
+        if (p.getBoolean("found_offers_v1_initialized", false)) return
+        p.edit().putBoolean("found_offers_v1_initialized", true).apply()
+        requestFullRescan(ctx)
+    }
     /** A new product requires historical re-evaluation, without clearing past alert deduplication. */
     @Synchronized fun requestFullRescan(ctx: Context) {
         val p = prefs(ctx)
@@ -121,9 +147,92 @@ object Store {
             "Post $messageId: " + compact.drop(start).take(260)).apply()
     }
 
-    fun recordOffer(ctx: Context, offer: OfferMatch, chatId: Long, messageId: Long) {
-        val description = "${offer.price ?: "price not identified"} · post $messageId · ${offer.source}"
-        prefs(ctx).edit().putString(productPrefix(offer.product) + "last_offer", description).apply()
+    private fun offerJson(offer: FoundOffer) = JSONObject().apply {
+        put("id", offer.id); put("product", offer.product); put("price", offer.price)
+        put("branch", offer.branch); put("channel", offer.channel); put("chat_id", offer.chatId)
+        put("message_id", offer.messageId); put("post_time", offer.postTime)
+        put("detected_time", offer.detectedTime); put("evidence", offer.evidence)
+        put("source", offer.source); put("confidence", offer.confidence)
+        put("verified", offer.verified); put("message_link", offer.messageLink)
+    }
+
+    private fun parseOffer(obj: JSONObject): FoundOffer? = runCatching {
+        FoundOffer(
+            id = obj.getString("id"), product = obj.getString("product"),
+            price = obj.optString("price", "Price not identified"),
+            branch = obj.optString("branch", "Branch not identified"),
+            channel = obj.optString("channel", "Telegram channel"),
+            chatId = obj.getLong("chat_id"), messageId = obj.getLong("message_id"),
+            postTime = obj.optLong("post_time", 0L), detectedTime = obj.optLong("detected_time", 0L),
+            evidence = obj.optString("evidence", "No OCR evidence saved"),
+            source = obj.optString("source", "OCR"),
+            confidence = obj.optString("confidence", "OCR match"),
+            // Every persisted offer currently comes from OCR and must remain unverified.
+            verified = false,
+            messageLink = obj.optString("message_link", "")
+        )
+    }.getOrNull()
+
+    /** Historical structured matches. Existing entries are updated, never duplicated or discarded. */
+    @Synchronized fun foundOffers(ctx: Context): List<FoundOffer> {
+        val raw = prefs(ctx).getString("found_offers_v1", "[]") ?: "[]"
+        return runCatching {
+            val arr = JSONArray(raw)
+            (0 until arr.length()).mapNotNull { parseOffer(arr.getJSONObject(it)) }
+                .sortedByDescending { it.detectedTime }
+        }.getOrDefault(emptyList())
+    }
+
+    @Synchronized fun recordOffer(
+        ctx: Context,
+        offer: OfferMatch,
+        chatId: Long,
+        messageId: Long,
+        postTime: Long,
+        branch: String,
+        channel: String
+    ): FoundOfferSave {
+        val id = OfferIdentity.key(chatId, messageId, offer.product)
+        val items = foundOffers(ctx).toMutableList()
+        val index = items.indexOfFirst { it.id == id }
+        val previous = items.getOrNull(index)
+        val evidence = offer.evidence.ifBlank { previous?.evidence ?: "Model name recognized in Telegram post" }
+        val record = FoundOffer(
+            id = id,
+            product = offer.product,
+            price = offer.price ?: previous?.price ?: "Price not identified",
+            branch = branch.takeUnless { it == "Branch not identified" }
+                ?: previous?.branch ?: "Branch not identified",
+            channel = channel.ifBlank { previous?.channel ?: "Telegram channel" },
+            chatId = chatId,
+            messageId = messageId,
+            postTime = postTime,
+            detectedTime = previous?.detectedTime ?: System.currentTimeMillis(),
+            evidence = evidence.take(260),
+            source = offer.source,
+            confidence = offer.confidence,
+            verified = false,
+            messageLink = previous?.messageLink.orEmpty()
+        )
+        if (index >= 0) items[index] = record else items.add(record)
+        val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
+        val description = "${record.price} · ${record.channel} · post $messageId · ${record.source}"
+        prefs(ctx).edit()
+            .putString("found_offers_v1", arr.toString())
+            .putString(productPrefix(offer.product) + "last_offer", description)
+            .apply()
+        return FoundOfferSave(record, index < 0)
+    }
+
+    @Synchronized fun updateOfferLink(ctx: Context, id: String, link: String): FoundOffer? {
+        if (link.isBlank()) return foundOffers(ctx).firstOrNull { it.id == id }
+        val items = foundOffers(ctx).toMutableList()
+        val index = items.indexOfFirst { it.id == id }
+        if (index < 0) return null
+        items[index] = items[index].copy(messageLink = link)
+        val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
+        prefs(ctx).edit().putString("found_offers_v1", arr.toString()).apply()
+        return items[index]
     }
 
     fun historyProgress(ctx: Context, chatId: Long): String {

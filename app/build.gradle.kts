@@ -12,10 +12,10 @@ android {
         applicationId = "com.productwatcher.app"
         minSdk = 26
         targetSdk = 35
-        // Keep upgrades installable over the previously published versionCode 2
-        // build so Android retains the existing Telegram session and app data.
-        versionCode = 3
-        versionName = "0.4.2"
+        // Keep upgrades installable over earlier builds so Android retains the
+        // existing Telegram session, watchlist and app data.
+        versionCode = 4
+        versionName = "0.5.0"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
