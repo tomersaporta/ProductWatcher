@@ -140,7 +140,7 @@ class OfferMatchingTest {
             CandidateScreening.candidates(lines, "", listOf("Dreame X60 Ultra Complete", "Roborock S8")))
     }
 
-    @Test fun cloudOutputRequiresExactVariantAndSameTileEvidence() {
+    @Test fun localModelOutputRequiresExactVariantAndSameTileEvidence() {
         val region = VisionRegion(0.5, 0.1, 0.8, 0.4)
         val correct = VisionResultValidator.validate(
             VisionMatch("Dreame X60 Ultra Complete", 3799, "קרית ביאליק", "X60 Ultra Complete", "₪3799", "same_tile", region, region),

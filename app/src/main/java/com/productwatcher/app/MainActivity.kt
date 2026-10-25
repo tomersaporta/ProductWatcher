@@ -124,7 +124,7 @@ class MainActivity : ComponentActivity() {
     private fun inspectEvidence(offer: FoundOffer) {
         AlertDialog.Builder(this)
             .setTitle("OCR / image evidence · ${offer.product}")
-            .setMessage("Local OCR:\n${offer.evidence}\n\nCloud image evidence:\n${offer.visionEvidence.ifBlank { "Not available" }}\n\nAssociation: ${offer.associationReason}\n" +
+            .setMessage("Local OCR:\n${offer.evidence}\n\nOn-device model evidence:\n${offer.visionEvidence.ifBlank { "Not available" }}\n\nAssociation: ${offer.associationReason}\n" +
                 "Confidence: ${offer.confidence}\nState: ${offer.reviewState}\n" +
                 "Image-supported does not mean store-verified. Review the source post before purchase.")
             .setPositiveButton("Close", null)
@@ -132,26 +132,26 @@ class MainActivity : ComponentActivity() {
                 if (offer.messageLink.isNotBlank()) setNeutralButton("Open Telegram") { _, _ -> openTelegram(offer.messageLink) }
             }.show()
     }
-    private fun cloudSettingsDialog() {
-        val endpoint = EditText(this).apply { hint = "https://your-worker.example.workers.dev"; setText(CloudVisionSettings.endpoint(this@MainActivity)); setSingleLine() }
+    private fun localAiSettingsDialog() {
         val token = EditText(this).apply {
-            hint = "Proxy access token"; setText(CloudVisionSettings.token(this@MainActivity)); setSingleLine()
+            hint = "Hugging Face token for one-time download"; setText(LocalVisionSettings.token(this@MainActivity)); setSingleLine()
             inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
-        val enabled = CheckBox(this).apply { text = "Enable opt-in cloud image analysis"; isChecked = CloudVisionSettings.enabled(this@MainActivity) }
+        val enabled = CheckBox(this).apply { text = "Enable fully local image analysis"; isChecked = LocalVisionSettings.enabled(this@MainActivity) }
         val retention = EditText(this).apply {
-            hint = "Private image retention days"; setText(CloudVisionSettings.retentionDays(this@MainActivity).toString())
+            hint = "Private image retention days"; setText(LocalVisionSettings.retentionDays(this@MainActivity).toString())
             inputType = android.text.InputType.TYPE_CLASS_NUMBER; setSingleLine()
         }
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(5), dp(20), 0)
-            addView(label("Telegram login data is never uploaded. Candidate images, caption and OCR evidence are sent only to your configured proxy.", 12f, muted))
-            addView(pad(10)); addView(endpoint); addView(token); addView(enabled); addView(retention)
+            addView(label("After the one-time licensed model download, photos, captions and OCR evidence remain on this device. The model needs several GB of private storage and a capable physical phone.", 12f, muted))
+            addView(pad(10)); addView(token); addView(enabled); addView(retention)
         }
-        AlertDialog.Builder(this).setTitle("Cloud image analysis").setView(layout)
+        AlertDialog.Builder(this).setTitle("On-device AI vision").setView(layout)
             .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
-                CloudVisionSettings.configure(this, enabled.isChecked, endpoint.text.toString(), token.text.toString())
-                CloudVisionSettings.setRetentionDays(this, retention.text.toString().toIntOrNull() ?: 30)
+                LocalVisionSettings.setToken(this, token.text.toString())
+                LocalVisionSettings.setEnabled(this, enabled.isChecked)
+                LocalVisionSettings.setRetentionDays(this, retention.text.toString().toIntOrNull() ?: 30)
                 render()
             }.show()
     }
@@ -266,7 +266,7 @@ class MainActivity : ComponentActivity() {
                 found.addView(pad(9))
                 found.addView(label("Confidence: ${offer.confidence}", 13f, ink, true))
                 found.addView(label("Method: ${offer.source}", 12f, muted))
-                if (offer.modelVersion.isNotBlank()) found.addView(label("Cloud model: ${offer.modelVersion} · analyzed ${formattedTime(offer.analysisTimestamp)}", 12f, muted))
+                if (offer.modelVersion.isNotBlank()) found.addView(label("On-device model: ${offer.modelVersion} · analyzed ${formattedTime(offer.analysisTimestamp)}", 12f, muted))
                 found.addView(label("Assessment: ${offer.associationReason}", 12f, muted))
                 found.addView(pad(8))
                 found.addView(label("OCR evidence", 12f, muted, true))
@@ -362,19 +362,26 @@ class MainActivity : ComponentActivity() {
         activity.addView(deleteImages)
         activity.addView(label("Only TDLib's cache copy is deleted. App-private source images used by saved matches follow the retention controls below. Telegram posts are never deleted.", 12f, muted))
         activity.addView(pad(12))
-        val cloudState = if (CloudVisionSettings.ready(this)) "Enabled" else if (CloudVisionSettings.enabled(this)) "Configuration incomplete" else "Disabled"
-        activity.addView(label("Cloud image analysis: $cloudState", 14f, ink, true))
-        activity.addView(label("Today: ${CloudVisionSettings.dailyRequests(this)} requests · estimated backend-reported cost $${"%.4f".format(CloudVisionSettings.dailyCost(this))}", 12f, muted))
+        val localState = when { LocalVisionSettings.ready(this) -> "Ready and offline"; LocalVisionSettings.enabled(this) -> "Enabled · model required"; else -> "Disabled" }
+        activity.addView(label("On-device AI vision: $localState", 14f, ink, true))
+        activity.addView(label("${LocalVisionSettings.MODEL_VERSION}\n${LocalVisionSettings.status(this)}", 12f, muted))
         activity.addView(pad(8))
-        activity.addView(button("Configure cloud analysis", false) { cloudSettingsDialog() })
+        activity.addView(button("Configure local AI", false) { localAiSettingsDialog() })
+        activity.addView(pad(8))
+        if (!LocalVisionSettings.modelReady(this)) activity.addView(button("Download model once on Wi-Fi", false) {
+            if (LocalVisionSettings.token(this).isBlank()) Toast.makeText(this, "Configure a Hugging Face token after accepting the Gemma license", Toast.LENGTH_LONG).show()
+            else { LocalVisionSettings.setStatus(this, "Model download queued for unmetered network"); LocalModelDownloadWorker.enqueue(this); render() }
+        }) else activity.addView(button("Remove downloaded local model", false) {
+            LocalVisionSettings.setEnabled(this, false); LocalVisionSettings.removeModel(this); render()
+        })
         activity.addView(pad(8))
         activity.addView(button("Analyze up to 50 historical posts", false) {
-            if (!CloudVisionSettings.ready(this)) Toast.makeText(this, "Configure and enable the HTTPS cloud proxy first", Toast.LENGTH_LONG).show()
+            if (!LocalVisionSettings.ready(this)) Toast.makeText(this, "Download and enable the on-device model first", Toast.LENGTH_LONG).show()
             else { Store.requestVisionRescan(this, 50); TelegramClient.scanSelectedChannel(); render() }
         })
         activity.addView(pad(8))
         activity.addView(button("Clean expired private images", false) {
-            Toast.makeText(this, "Removed ${CloudVisionQueue.cleanup(this)} expired image files", Toast.LENGTH_LONG).show(); render()
+            Toast.makeText(this, "Removed ${LocalVisionQueue.cleanup(this)} expired image files", Toast.LENGTH_LONG).show(); render()
         })
         activity.addView(pad(12))
         activity.addView(button("Rescan full Telegram history", false) {
@@ -385,6 +392,6 @@ class MainActivity : ComponentActivity() {
         activity.addView(pad(9))
         activity.addView(button("Share status report", false) { share() })
         body.addView(activity)
-        body.addView(label("Direct TDLib connection · On-device OCR · Optional authenticated cloud image analysis · Background catch-up", 12f, muted))
+        body.addView(label("Direct TDLib connection · ML Kit OCR · Optional fully local Gemma vision · Background catch-up", 12f, muted))
     }
 }

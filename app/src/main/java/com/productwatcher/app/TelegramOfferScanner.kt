@@ -56,7 +56,7 @@ object TelegramOfferScanner {
         val source = save("offer_sources", 2048, 90)
         val thumbnail = save("offer_thumbnails", 720, 82)
         SavedImages(source.absolutePath, thumbnail.absolutePath,
-            CloudVisionQueue.imageIdentifier(source.absolutePath) ?: error("Unable to hash source image"))
+            LocalVisionQueue.imageIdentifier(source.absolutePath) ?: error("Unable to hash source image"))
     }.getOrNull()
 
     private fun queuePhoto(job: () -> Unit) {
@@ -145,7 +145,7 @@ object TelegramOfferScanner {
                                     if (result.text.isBlank() && Store.products(ctx).none { Matcher.matches(caption, it) }) {
                                         val candidates = Store.visionCandidates(ctx,
                                             CandidateScreening.candidates(lines, caption, Store.products(ctx)))
-                                        if (CloudVisionSettings.ready(ctx) && candidates.isNotEmpty()) {
+                                        if (LocalVisionSettings.ready(ctx) && candidates.isNotEmpty()) {
                                             val pendingOffers = candidates.map { pendingMatch(it, "Local OCR was weak; awaiting image analysis") }
                                             val images = saveImages(ctx, path, chatId, message.id)
                                             completed(ctx, key, chatId, message, caption, result.text, lines, pendingOffers,
@@ -156,12 +156,12 @@ object TelegramOfferScanner {
                                         val local = OfferExtractor.extract(lines, Store.products(ctx), caption)
                                         val candidates = Store.visionCandidates(ctx,
                                             CandidateScreening.candidates(lines, caption, Store.products(ctx)))
-                                        val cloudReady = CloudVisionSettings.ready(ctx)
-                                        val localForStorage = if (cloudReady) local.map { offer ->
+                                        val localAiReady = LocalVisionSettings.ready(ctx)
+                                        val localForStorage = if (localAiReady) local.map { offer ->
                                             if (offer.product in candidates) offer.copy(reviewState = "PENDING_ANALYSIS",
-                                                associationReason = "Local OCR candidate awaiting cloud image validation") else offer
+                                                associationReason = "Local OCR candidate awaiting on-device image validation") else offer
                                         } else local
-                                        val pending = if (cloudReady) candidates.filter { p -> local.none { it.product == p } }
+                                        val pending = if (localAiReady) candidates.filter { p -> local.none { it.product == p } }
                                             .map { pendingMatch(it, "Partial OCR candidate awaiting image analysis") } else emptyList()
                                         val offers = localForStorage + pending
                                         val images = if (offers.isNotEmpty()) saveImages(ctx, path, chatId, message.id) else null
@@ -193,7 +193,7 @@ object TelegramOfferScanner {
     }
 
     private fun pendingMatch(product: String, reason: String) = OfferMatch(
-        product, null, "Partial/local OCR candidate", "pending cloud image analysis",
+        product, null, "Partial/local OCR candidate", "pending on-device image analysis",
         "Pending · $reason", 0.0, "PENDING_ANALYSIS", reason
     )
 
@@ -241,15 +241,14 @@ object TelegramOfferScanner {
                 }
                 status(ctx, "Match: ${record.product} · ${record.price}")
             }
-            if (images != null && CloudVisionSettings.ready(ctx)) {
+            if (images != null && LocalVisionSettings.ready(ctx)) {
                 val watched = saved.map { it.offer.product }.distinct()
-                val promptVersion = CloudVisionSettings.promptVersion(ctx)
-                CloudVisionQueue.enqueue(ctx, VisionJob(
-                    id = "${chatId}_${messageId}_${images.identifier}_${promptVersion.hashCode()}", chatId = chatId, messageId = messageId,
+                LocalVisionQueue.enqueue(ctx, LocalVisionJob(
+                    id = "${chatId}_${messageId}_${images.identifier}_local_v1", chatId = chatId, messageId = messageId,
                     channel = channel, postUrl = link.orEmpty(), postedAt = message.date.toLong() * 1000L,
                     detectedAt = System.currentTimeMillis(), caption = caption, ocrEvidence = ocr.take(4000),
                     ocrLines = lines, watched = watched, sourceImagePath = images.source,
-                    thumbnailPath = images.thumbnail, imageIdentifier = images.identifier, promptVersion = promptVersion
+                    thumbnailPath = images.thumbnail, imageIdentifier = images.identifier
                 ))
             }
             onStatus?.invoke()
@@ -263,8 +262,8 @@ object TelegramOfferScanner {
         onStatus?.invoke()
     }
 
-    fun notifyCloudResult(ctx: Context, offer: FoundOffer) {
-        val key = "offer_cloud_${offer.id.hashCode()}_${offer.price.hashCode()}_${offer.modelVersion.hashCode()}"
+    fun notifyVisionResult(ctx: Context, offer: FoundOffer) {
+        val key = "offer_local_ai_${offer.id.hashCode()}_${offer.price.hashCode()}_${offer.modelVersion.hashCode()}"
         if (OfferAlertPolicy.shouldAlert(offer.verified, offer.reviewState, offer.confidenceScore, offer.price) &&
             !Store.seen(ctx, key) && notifyOffer(ctx, offer)) Store.markSeen(ctx, key)
     }

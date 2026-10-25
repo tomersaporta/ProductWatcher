@@ -59,7 +59,7 @@ object Store {
     @Synchronized fun requestVisionRescan(ctx: Context, maxPosts: Int = 50) {
         prefs(ctx).edit().putInt("vision_rescan_budget", maxPosts.coerceIn(1, 200)).apply()
         requestFullRescan(ctx)
-        setTelegramStatus(ctx, "Bounded cloud-image rescan requested · up to ${maxPosts.coerceIn(1, 200)} candidate posts")
+        setTelegramStatus(ctx, "Bounded on-device image rescan requested · up to ${maxPosts.coerceIn(1, 200)} candidate posts")
     }
     @Synchronized fun visionCandidates(ctx: Context, automatic: List<String>): List<String> {
         val p = prefs(ctx); val remaining = p.getInt("vision_rescan_budget", 0)
@@ -310,7 +310,7 @@ object Store {
     }
 
     @Synchronized fun applyVisionResults(
-        ctx: Context, job: VisionJob, results: List<ValidatedVisionMatch>, modelVersion: String, analyzedAt: Long
+        ctx: Context, job: LocalVisionJob, results: List<ValidatedVisionMatch>, modelVersion: String, analyzedAt: Long
     ): List<FoundOffer> {
         val items = foundOffers(ctx).toMutableList()
         val updated = mutableListOf<FoundOffer>()
@@ -323,7 +323,7 @@ object Store {
                 price = priceText, priceIls = result.priceIls, exactModel = result.exactModel,
                 branch = previous.branch.takeUnless { it == "Branch not identified" } ?: result.branch ?: previous.branch,
                 evidence = previous.evidence, visionEvidence = result.evidence,
-                source = "local OCR + cloud image analysis", confidence = "${(result.confidence * 100).toInt()}% · ${result.reason}",
+                source = "local OCR + on-device image model", confidence = "${(result.confidence * 100).toInt()}% · ${result.reason}",
                 confidenceScore = result.confidence, reviewState = result.verificationStatus,
                 associationReason = result.reason, verified = false,
                 priceRegion = result.priceRegion, productRegion = result.productRegion,
@@ -334,8 +334,8 @@ object Store {
         }
         val matchedIds = results.map { OfferIdentity.key(job.chatId, job.messageId, it.product) }.toSet()
         items.indices.filter { items[it].chatId == job.chatId && items[it].messageId == job.messageId && items[it].id !in matchedIds && items[it].reviewState == "PENDING_ANALYSIS" }
-            .forEach { i -> items[i] = items[i].copy(reviewState = "UNCERTAIN", associationReason = "Cloud analysis did not confirm the watched model",
-                auditTrail = appendAudit(items[i].auditTrail, "UNCERTAIN", null, "Cloud analysis did not confirm the watched model")) }
+            .forEach { i -> items[i] = items[i].copy(reviewState = "UNCERTAIN", associationReason = "On-device analysis did not confirm the watched model",
+                auditTrail = appendAudit(items[i].auditTrail, "UNCERTAIN", null, "On-device analysis did not confirm the watched model")) }
         val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
         prefs(ctx).edit().putString("found_offers_v1", arr.toString()).apply()
         return updated

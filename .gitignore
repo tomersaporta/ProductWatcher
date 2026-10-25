@@ -4,6 +4,3 @@ app/build/
 .idea/
 local.properties
 *.iml
-backend/node_modules/
-backend/wrangler.toml
-.dev.vars

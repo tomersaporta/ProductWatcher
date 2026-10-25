@@ -48,7 +48,7 @@ object CandidateScreening {
     }
 }
 
-/** Cloud output is evidence, not authority. Exact identity and geometry are revalidated locally. */
+/** Model output is evidence, not authority. Exact identity and geometry are revalidated deterministically. */
 object VisionResultValidator {
     fun validate(match: VisionMatch, watchlist: List<String>): ValidatedVisionMatch? {
         val watched = watchlist.singleOrNull { requested ->
@@ -76,8 +76,8 @@ object VisionResultValidator {
             verificationStatus = if (verifiedByImage) "VERIFIED_BY_IMAGE" else "UNCERTAIN",
             reason = when {
                 verifiedByImage -> "Exact watched model and price are visibly linked in one product tile"
-                !plausible && match.priceIls != null -> "Cloud price failed local model-specific plausibility checks"
-                !sameTile && match.priceIls != null -> "Cloud price was not linked to the product by a supported spatial relationship"
+                !plausible && match.priceIls != null -> "Model price failed local model-specific plausibility checks"
+                !sameTile && match.priceIls != null -> "Model price was not linked to the product by a supported spatial relationship"
                 else -> "Image evidence is incomplete and requires review"
             },
             productRegion = match.productRegion?.encoded().orEmpty(),

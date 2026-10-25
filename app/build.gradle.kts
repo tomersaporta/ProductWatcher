@@ -12,13 +12,13 @@ android {
         applicationId = "com.productwatcher.app"
         minSdk = 26
         targetSdk = 35
-        // Keep upgrades installable over earlier builds so Android retains the
-        // existing Telegram session, watchlist and app data.
-        versionCode = 6
-        versionName = "0.7.0"
+        // Keep upgrades installable over the previously published versionCode 2
+        // build so Android retains the existing Telegram session and app data.
+        versionCode = 7
+        versionName = "0.8.0"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
-    kotlinOptions { jvmTarget = "17" }
+    kotlin { compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 }
 
 dependencies {
@@ -28,4 +28,5 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
 }
