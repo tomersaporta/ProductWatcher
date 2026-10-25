@@ -22,6 +22,8 @@ class OfferMatchingTest {
         assertFalse(Matcher.matches("Dreame X60 Pro Ultra", "X60 Ultra Complete"))
         assertFalse(Matcher.matches("Dreame X60 Ultra Complete", "X60 Pro Ultra Complete"))
         assertTrue(Matcher.matches("Dreame X60 Pro Ultra Complete", "X60 Pro Ultra Complete"))
+        assertTrue(Matcher.matches("Dreame X60 Max Ultra", "X60 Max Ultra"))
+        assertFalse(Matcher.matches("Dreame X60 Max Ultra", "X60 Ultra Complete"))
     }
 
     @Test fun priceTagsUseLocationNotFirstPrice() {
@@ -52,7 +54,7 @@ class OfferMatchingTest {
         )
         assertEquals(1, found.size)
         assertEquals("Dreame X60 Pro Ultra", found.single().product)
-        assertEquals("₪4399 (OCR, unverified)", found.single().price)
+        assertEquals("₪4399 (caption, unverified)", found.single().price)
         assertFalse(found.single().priceVerified)
         assertTrue(found.single().evidence.contains("X60 Pro Ultra"))
     }
@@ -66,5 +68,53 @@ class OfferMatchingTest {
             OfferIdentity.key(-100123L, 456L, "Dreame X60 Pro Ultra"),
             OfferIdentity.key(-100123L, 456L, "Dreame X60 Ultra Complete")
         )
+    }
+
+    @Test fun rejectsAccessoryPriceAndKeepsCorrectCollagePrice() {
+        val lines = listOf(
+            OcrLine("Accessory bundle", 80, 180, 350, 240),
+            OcrLine("795", 170, 380, 270, 430),
+            OcrLine("Dreame X60 Ultra Complete", 570, 180, 930, 240),
+            OcrLine("2450", 680, 390, 810, 450)
+        )
+        val found = OfferExtractor.extract(lines, listOf("Dreame X60 Ultra Complete")).single()
+        assertEquals("₪2450 (OCR, unverified)", found.price)
+        assertEquals("UNCERTAIN", found.reviewState)
+        assertTrue(found.evidence.contains("2450"))
+        assertFalse(OfferExtractor.plausiblePrice("Dreame X60 Ultra Complete", "795"))
+    }
+
+    @Test fun ambiguousSameTilePricesRemainUnknown() {
+        val lines = listOf(
+            OcrLine("Dreame X60 Ultra Complete", 120, 160, 480, 225),
+            OcrLine("2450", 220, 360, 330, 415),
+            OcrLine("2590", 250, 370, 360, 425)
+        )
+        val offer = OfferExtractor.extract(lines, listOf("Dreame X60 Ultra Complete")).single()
+        assertNull(offer.price)
+        assertEquals("REVIEW_NEEDED", offer.reviewState)
+    }
+
+    @Test fun captionBranchAndDateTakePriorityOverOcr() {
+        val metadata = SourceMetadataExtractor.extract(
+            "סניף אושר עד קרית ביאליק 20.10.2026",
+            "סניף אושר עד תל אביב 19.10.2026"
+        )
+        assertEquals("אושר עד קרית ביאליק", metadata.branch)
+        assertEquals("Telegram caption", metadata.branchSource)
+        assertEquals("20.10.2026", metadata.sourceDate)
+    }
+
+    @Test fun acceptsCanonicalPublicAndPrivateTelegramLinksOnly() {
+        assertEquals("https://t.me/shop/123", MessageLinkPolicy.normalize(" https://t.me/shop/123 "))
+        assertEquals("tg://privatepost?channel=123&post=4", MessageLinkPolicy.normalize("tg://privatepost?channel=123&post=4"))
+        assertNull(MessageLinkPolicy.normalize("https://example.com/not-telegram"))
+    }
+
+    @Test fun lowConfidenceAndUnknownPricesNeverAlert() {
+        assertFalse(OfferAlertPolicy.shouldAlert(false, "REVIEW_NEEDED", 0.91, "₪2450 (OCR, unverified)"))
+        assertFalse(OfferAlertPolicy.shouldAlert(false, "UNCERTAIN", 0.90, "Price unknown · review required"))
+        assertFalse(OfferAlertPolicy.shouldAlert(false, "UNCERTAIN", 0.70, "₪2450 (OCR, unverified)"))
+        assertTrue(OfferAlertPolicy.shouldAlert(false, "UNCERTAIN", 0.82, "₪2450 (OCR, unverified)"))
     }
 }

@@ -5,6 +5,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <application android:allowBackup="false" android:label="Product Watcher" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:supportsRtl="true">
+        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.files" android:exported="false" android:grantUriPermissions="true">
+            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
+        </provider>
         <receiver android:name=".MonitorBootReceiver" android:exported="false"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter></receiver>
         <service android:name=".TelegramMonitorService" android:exported="false" android:foregroundServiceType="dataSync" android:stopWithTask="false" />
         <activity android:name=".TelegramActivity" android:exported="false" />

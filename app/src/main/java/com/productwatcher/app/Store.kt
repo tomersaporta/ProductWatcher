@@ -16,11 +16,17 @@ data class FoundOffer(
     val messageId: Long,
     val postTime: Long,
     val detectedTime: Long,
+    val sourceDate: String,
     val evidence: String,
     val source: String,
     val confidence: String,
+    val confidenceScore: Double,
+    val reviewState: String,
+    val associationReason: String,
+    val branchSource: String,
     val verified: Boolean,
-    val messageLink: String
+    val messageLink: String,
+    val photoPath: String
 )
 
 data class FoundOfferSave(val offer: FoundOffer, val inserted: Boolean)
@@ -38,11 +44,12 @@ object Store {
     fun deleteTelegramImages(ctx: Context): Boolean = prefs(ctx).getBoolean("delete_telegram_images", true)
     fun setDeleteTelegramImages(ctx: Context, enabled: Boolean) = prefs(ctx).edit().putBoolean("delete_telegram_images", enabled).apply()
     fun scanGeneration(ctx: Context): Long = prefs(ctx).getLong("scan_generation", 0L)
-    /** One-time, non-destructive backfill for installs upgraded from pre-structured offer storage. */
+    /** One-time, non-destructive backfill for the current structured offer schema. */
     @Synchronized fun ensureStructuredOfferBackfill(ctx: Context) {
         val p = prefs(ctx)
-        if (p.getBoolean("found_offers_v1_initialized", false)) return
-        p.edit().putBoolean("found_offers_v1_initialized", true).apply()
+        if (p.getBoolean("found_offers_v2_enriched", false)) return
+        p.edit().putBoolean("found_offers_v1_initialized", true)
+            .putBoolean("found_offers_v2_enriched", true).apply()
         requestFullRescan(ctx)
     }
     /** A new product requires historical re-evaluation, without clearing past alert deduplication. */
@@ -151,9 +158,12 @@ object Store {
         put("id", offer.id); put("product", offer.product); put("price", offer.price)
         put("branch", offer.branch); put("channel", offer.channel); put("chat_id", offer.chatId)
         put("message_id", offer.messageId); put("post_time", offer.postTime)
-        put("detected_time", offer.detectedTime); put("evidence", offer.evidence)
+        put("detected_time", offer.detectedTime); put("source_date", offer.sourceDate)
+        put("evidence", offer.evidence)
         put("source", offer.source); put("confidence", offer.confidence)
-        put("verified", offer.verified); put("message_link", offer.messageLink)
+        put("confidence_score", offer.confidenceScore); put("review_state", offer.reviewState)
+        put("association_reason", offer.associationReason); put("branch_source", offer.branchSource)
+        put("verified", offer.verified); put("message_link", offer.messageLink); put("photo_path", offer.photoPath)
     }
 
     private fun parseOffer(obj: JSONObject): FoundOffer? = runCatching {
@@ -164,12 +174,17 @@ object Store {
             channel = obj.optString("channel", "Telegram channel"),
             chatId = obj.getLong("chat_id"), messageId = obj.getLong("message_id"),
             postTime = obj.optLong("post_time", 0L), detectedTime = obj.optLong("detected_time", 0L),
+            sourceDate = obj.optString("source_date", "Unknown"),
             evidence = obj.optString("evidence", "No OCR evidence saved"),
             source = obj.optString("source", "OCR"),
             confidence = obj.optString("confidence", "OCR match"),
-            // Every persisted offer currently comes from OCR and must remain unverified.
-            verified = false,
-            messageLink = obj.optString("message_link", "")
+            confidenceScore = obj.optDouble("confidence_score", 0.0),
+            reviewState = obj.optString("review_state", "REVIEW_NEEDED"),
+            associationReason = obj.optString("association_reason", "Legacy match requires review"),
+            branchSource = obj.optString("branch_source", "Unknown"),
+            verified = obj.optBoolean("verified", false),
+            messageLink = obj.optString("message_link", ""),
+            photoPath = obj.optString("photo_path", "")
         )
     }.getOrNull()
 
@@ -189,8 +204,9 @@ object Store {
         chatId: Long,
         messageId: Long,
         postTime: Long,
-        branch: String,
-        channel: String
+        metadata: SourceMetadata,
+        channel: String,
+        photoPath: String?
     ): FoundOfferSave {
         val id = OfferIdentity.key(chatId, messageId, offer.product)
         val items = foundOffers(ctx).toMutableList()
@@ -200,19 +216,26 @@ object Store {
         val record = FoundOffer(
             id = id,
             product = offer.product,
-            price = offer.price ?: previous?.price ?: "Price not identified",
-            branch = branch.takeUnless { it == "Branch not identified" }
+            // A conservative rescan is authoritative: a formerly guessed price becomes unknown.
+            price = offer.price ?: "Price unknown · review required",
+            branch = metadata.branch
                 ?: previous?.branch ?: "Branch not identified",
             channel = channel.ifBlank { previous?.channel ?: "Telegram channel" },
             chatId = chatId,
             messageId = messageId,
             postTime = postTime,
             detectedTime = previous?.detectedTime ?: System.currentTimeMillis(),
+            sourceDate = metadata.sourceDate ?: previous?.sourceDate ?: "Unknown",
             evidence = evidence.take(260),
             source = offer.source,
             confidence = offer.confidence,
+            confidenceScore = offer.confidenceScore,
+            reviewState = offer.reviewState,
+            associationReason = offer.associationReason,
+            branchSource = metadata.branchSource ?: previous?.branchSource ?: "Unknown",
             verified = false,
-            messageLink = previous?.messageLink.orEmpty()
+            messageLink = previous?.messageLink.orEmpty(),
+            photoPath = photoPath ?: previous?.photoPath.orEmpty()
         )
         if (index >= 0) items[index] = record else items.add(record)
         val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
@@ -225,11 +248,12 @@ object Store {
     }
 
     @Synchronized fun updateOfferLink(ctx: Context, id: String, link: String): FoundOffer? {
-        if (link.isBlank()) return foundOffers(ctx).firstOrNull { it.id == id }
+        val safeLink = MessageLinkPolicy.normalize(link)
+            ?: return foundOffers(ctx).firstOrNull { it.id == id }
         val items = foundOffers(ctx).toMutableList()
         val index = items.indexOfFirst { it.id == id }
         if (index < 0) return null
-        items[index] = items[index].copy(messageLink = link)
+        items[index] = items[index].copy(messageLink = safeLink)
         val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
         prefs(ctx).edit().putString("found_offers_v1", arr.toString()).apply()
         return items[index]

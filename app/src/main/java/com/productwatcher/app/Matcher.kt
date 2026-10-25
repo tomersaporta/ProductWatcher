@@ -15,7 +15,7 @@ object Matcher {
 
     data class Model(val number: String, val tier: String, val complete: Boolean, val text: String)
 
-    private fun models(text: String): List<Model> = modelPattern.findAll(normalized(text)).map { m ->
+    fun parsedModels(text: String): List<Model> = modelPattern.findAll(normalized(text)).map { m ->
         val prefix = m.groupValues[3]
         val suffix = m.groupValues[4]
         val tier = when {
@@ -27,12 +27,12 @@ object Matcher {
         Model("x${m.groupValues[1]}${m.groupValues[2]}", tier, suffix.startsWith("complet"), m.value)
     }.toList()
 
-    fun distinctModelCount(text: String): Int = models(text).map { it.number + ":" + it.tier }.distinct().size
+    fun distinctModelCount(text: String): Int = parsedModels(text).map { it.number + ":" + it.tier + ":" + it.complete }.distinct().size
 
     fun matches(text: String, product: String): Boolean {
-        val requested = models(product).firstOrNull()
+        val requested = parsedModels(product).firstOrNull()
         if (requested != null) {
-            return models(text).any { found ->
+            return parsedModels(text).any { found ->
                 found.number == requested.number && found.tier == requested.tier &&
                     (!requested.complete || found.complete)
             }
@@ -51,12 +51,5 @@ object Matcher {
         return if (prices.size == 1) "₪${prices.single()} (OCR, unverified)" else null
     }
 
-    fun branch(text: String): String? {
-        val patterns = listOf(
-            Regex("(?:סניף|branch)\\s*[:：-]?\\s*([\\p{L}][\\p{L} \\-]{1,32})", RegexOption.IGNORE_CASE),
-            Regex("(?:באושר\\s*עד|אושר\\s*עד\\s*[-–:])\\s*([\\p{L}][\\p{L} \\-]{1,32})", RegexOption.IGNORE_CASE)
-        )
-        return patterns.firstNotNullOfOrNull { it.find(text)?.groupValues?.getOrNull(1) }
-            ?.lineSequence()?.firstOrNull()?.trim()?.take(35)
-    }
+    fun branch(text: String): String? = SourceMetadataExtractor.extract("", text).branch
 }

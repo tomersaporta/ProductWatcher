@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
@@ -16,6 +18,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import org.drinkless.tdlib.TdApi
 import java.io.File
+import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -33,6 +36,21 @@ object TelegramOfferScanner {
 
     fun init(ctx: Context) { app = ctx.applicationContext }
     fun hasPendingWork(): Boolean = pending.get() > 0 || inFlight.isNotEmpty()
+
+    /** Durable preview owned by the app; independent from TDLib's optional cache cleanup. */
+    private fun saveThumbnail(ctx: Context, sourcePath: String, chatId: Long, messageId: Long): String? = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(sourcePath, bounds)
+        var sample = 1
+        while (bounds.outWidth / sample > 1000 || bounds.outHeight / sample > 1000) sample *= 2
+        val bitmap = BitmapFactory.decodeFile(sourcePath, BitmapFactory.Options().apply { inSampleSize = sample })
+            ?: return@runCatching null
+        val directory = File(ctx.filesDir, "offer_thumbnails").apply { mkdirs() }
+        val target = File(directory, "${chatId}_${messageId}.jpg")
+        FileOutputStream(target).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 84, it) }
+        bitmap.recycle()
+        target.absolutePath
+    }.getOrNull()
 
     private fun queuePhoto(job: () -> Unit) {
         synchronized(queueLock) { queue.addLast(job) }
@@ -80,15 +98,15 @@ object TelegramOfferScanner {
             }
             val photo = message.content as? TdApi.MessagePhoto
             if (photo == null) {
-                completed(ctx, key, chatId, message, caption,
-                    OfferExtractor.extract(emptyList(), Store.products(ctx), caption), true)
+                completed(ctx, key, chatId, message, caption, caption,
+                    OfferExtractor.extract(emptyList(), Store.products(ctx), caption), true, null)
                 itemFinished(key)
                 continue
             }
             val best = photo.photo.sizes.filter { it.photo.id > 0 }
                 .maxByOrNull { it.width.toLong() * it.height }
             if (best == null) {
-                completed(ctx, key, chatId, message, "No downloadable Telegram photo size", emptyList(), false)
+                completed(ctx, key, chatId, message, caption, "No downloadable Telegram photo size", emptyList(), false, null)
                 itemFinished(key)
                 continue
             }
@@ -99,7 +117,7 @@ object TelegramOfferScanner {
                 TelegramClient.downloadPhoto(best.photo.id) { file ->
                     val path = file?.local?.path.orEmpty()
                     if (file?.local?.isDownloadingCompleted != true || path.isBlank() || !File(path).isFile) {
-                        completed(ctx, key, chatId, message, "Telegram photo download failed; will retry", emptyList(), false)
+                        completed(ctx, key, chatId, message, caption, "Telegram photo download failed; will retry", emptyList(), false, null)
                         pending.decrementAndGet()
                         itemFinished(key)
                         releasePhotoSlot()
@@ -118,15 +136,17 @@ object TelegramOfferScanner {
                                     Store.recordOcrDiagnostic(ctx, chatId, message.id, result.text)
                                     // Use position-based product/price linking, never first-price-in-photo.
                                     if (result.text.isBlank() && Store.products(ctx).none { Matcher.matches(caption, it) }) {
-                                        completed(ctx, key, chatId, message, "OCR returned no text; retry scheduled", emptyList(), false)
+                                        completed(ctx, key, chatId, message, caption, "OCR returned no text; retry scheduled", emptyList(), false, null)
                                     } else {
-                                        completed(ctx, key, chatId, message, "$caption\n${result.text}",
-                                            OfferExtractor.extract(lines, Store.products(ctx), caption), true)
+                                        val matches = OfferExtractor.extract(lines, Store.products(ctx), caption)
+                                        val thumbnail = if (matches.isNotEmpty()) saveThumbnail(ctx, path, chatId, message.id) else null
+                                        completed(ctx, key, chatId, message, caption, result.text,
+                                            matches, true, thumbnail)
                                         if (Store.deleteTelegramImages(ctx)) TelegramClient.deleteDownloadedPhoto(best.photo.id)
                                     }
                                 }
                                 .addOnFailureListener { e ->
-                                    completed(ctx, key, chatId, message, "OCR failed: ${e.message}", emptyList(), false)
+                                    completed(ctx, key, chatId, message, caption, "OCR failed: ${e.message}", emptyList(), false, null)
                                 }
                                 .addOnCompleteListener {
                                     recognizer.close()
@@ -136,7 +156,7 @@ object TelegramOfferScanner {
                                 }
                         } catch (e: Exception) {
                             recognizer.close()
-                            completed(ctx, key, chatId, message, "Image error: ${e.message}", emptyList(), false)
+                            completed(ctx, key, chatId, message, caption, "Image error: ${e.message}", emptyList(), false, null)
                             pending.decrementAndGet()
                             itemFinished(key)
                             releasePhotoSlot()
@@ -148,7 +168,8 @@ object TelegramOfferScanner {
     }
 
     private fun completed(ctx: Context, key: String, chatId: Long, message: TdApi.Message,
-                          ocr: String, offers: List<OfferMatch>, success: Boolean) {
+                          caption: String, ocr: String, offers: List<OfferMatch>, success: Boolean,
+                          photoPath: String?) {
         val messageId = message.id
         Store.recordMessageOutcome(ctx, chatId, messageId, success)
         if (!success) {
@@ -158,10 +179,12 @@ object TelegramOfferScanner {
             return // Never mark a failed message processed.
         }
         val products = Store.products(ctx)
-        val branch = Matcher.branch(ocr) ?: "Branch not identified"
+        val metadata = SourceMetadataExtractor.extract(caption, ocr)
+        val branch = metadata.branch ?: "Branch not identified"
         val channel = Store.monitoredChannels(ctx).firstOrNull { it.first == chatId }?.second ?: "Telegram channel"
         val saved = offers.map { offer ->
-            Store.recordOffer(ctx, offer, chatId, messageId, message.date.toLong() * 1000L, branch, channel)
+            Store.recordOffer(ctx, offer, chatId, messageId, message.date.toLong() * 1000L,
+                metadata, channel, photoPath)
         }
         val byName = saved.associateBy { it.offer.product }
         products.forEach { product ->
@@ -177,10 +200,14 @@ object TelegramOfferScanner {
         if (saved.isNotEmpty()) TelegramClient.messageLink(chatId, messageId) { link ->
             for (result in saved) {
                 val record = if (link != null) Store.updateOfferLink(ctx, result.offer.id, link) ?: result.offer else result.offer
-                val offerKey = "offer_${chatId}_${messageId}_${record.product.hashCode()}"
-                if (!Store.seen(ctx, offerKey) && notifyOffer(ctx, record)) {
+                val offerKey = "offer_v2_${record.id.hashCode()}_${record.price.hashCode()}"
+                val alertable = OfferAlertPolicy.shouldAlert(record.verified, record.reviewState,
+                    record.confidenceScore, record.price)
+                if (alertable && !Store.seen(ctx, offerKey) && notifyOffer(ctx, record)) {
                     Store.markSeen(ctx, offerKey)
                     Store.productEvent(ctx, record.product, "Alert sent · ${record.price}", alerted = true)
+                } else if (!alertable) {
+                    Store.productEvent(ctx, record.product, "Saved for review · ${record.associationReason}")
                 }
                 status(ctx, "Match: ${record.product} · ${record.price}")
             }

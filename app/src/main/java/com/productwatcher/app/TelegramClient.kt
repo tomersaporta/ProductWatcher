@@ -70,7 +70,7 @@ object TelegramClient {
                     useFileDatabase = true; useChatInfoDatabase = true; useMessageDatabase = true; useSecretChats = false
                     apiId = p.getInt("api_id", 0); apiHash = p.getString("api_hash", "").orEmpty()
                     systemLanguageCode = "en"; deviceModel = android.os.Build.MODEL
-                    systemVersion = android.os.Build.VERSION.RELEASE; applicationVersion = "0.5"
+                    systemVersion = android.os.Build.VERSION.RELEASE; applicationVersion = "0.6"
                 })
             }
             is TdApi.AuthorizationStateWaitPhoneNumber -> state = "Enter phone number"
@@ -116,7 +116,7 @@ object TelegramClient {
             pollOptionId = ""
             forAlbum = false
             inMessageThread = false
-        }) { response -> callback((response as? TdApi.MessageLink)?.link?.takeIf { it.isNotBlank() }) }
+        }) { response -> callback(MessageLinkPolicy.normalize((response as? TdApi.MessageLink)?.link)) }
     }
 
     /** DownloadFile can return before the download is finished. Wait for UpdateFile. */

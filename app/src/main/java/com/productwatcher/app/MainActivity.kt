@@ -1,9 +1,11 @@
 package com.productwatcher.app
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -16,6 +18,8 @@ import android.widget.*
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.File
 import java.text.DateFormat
 import java.util.Date
 
@@ -33,7 +37,9 @@ class MainActivity : ComponentActivity() {
     private var renderedOfferFingerprint = ""
     private val liveUpdater = object : Runnable {
         override fun run() {
-            val offerFingerprint = Store.foundOffers(this@MainActivity).joinToString("|") { it.id + it.messageLink }
+            val offerFingerprint = Store.foundOffers(this@MainActivity).joinToString("|") {
+                it.id + it.messageLink + it.price + it.reviewState + it.photoPath
+            }
             if (offerFingerprint != renderedOfferFingerprint) {
                 render()
                 handler.postDelayed(this, 4000L)
@@ -105,6 +111,27 @@ class MainActivity : ComponentActivity() {
         try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(link))) }
         catch (_: Exception) { Toast.makeText(this, "Telegram could not open this post", Toast.LENGTH_LONG).show() }
     }
+    private fun openPhoto(path: String) {
+        try {
+            val file = File(path)
+            val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+            startActivity(Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "image/jpeg")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            })
+        } catch (_: Exception) { Toast.makeText(this, "Saved source photo is unavailable", Toast.LENGTH_LONG).show() }
+    }
+    private fun inspectEvidence(offer: FoundOffer) {
+        AlertDialog.Builder(this)
+            .setTitle("OCR evidence · ${offer.product}")
+            .setMessage("${offer.evidence}\n\nAssociation: ${offer.associationReason}\n" +
+                "Confidence: ${offer.confidence}\nState: ${offer.reviewState}\n" +
+                "Price is not verified unless explicitly reviewed by a person.")
+            .setPositiveButton("Close", null)
+            .apply {
+                if (offer.messageLink.isNotBlank()) setNeutralButton("Open Telegram") { _, _ -> openTelegram(offer.messageLink) }
+            }.show()
+    }
     private fun share() {
         val report = "ProductWatcher Telegram report\nProducts: ${Store.products(this).joinToString()}\n" +
             Store.monitoredChannels(this).joinToString("\n") { (id, name) -> "$name: ${Store.channelReport(this, id)}" }
@@ -163,7 +190,9 @@ class MainActivity : ComponentActivity() {
         val offers = Store.foundOffers(this).let { list ->
             if (focusedOffer == null) list else list.sortedByDescending { it.id == focusedOffer }
         }
-        renderedOfferFingerprint = offers.joinToString("|") { it.id + it.messageLink }
+        renderedOfferFingerprint = offers.joinToString("|") {
+            it.id + it.messageLink + it.price + it.reviewState + it.photoPath
+        }
         if (offers.isEmpty()) {
             val empty = card()
             empty.addView(label("No matching offers found yet", 17f, ink, true))
@@ -179,23 +208,47 @@ class MainActivity : ComponentActivity() {
                 }
                 found.addView(label(offer.product, 20f, navy, true))
                 found.addView(pad(6))
+                val photo = offer.photoPath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
+                if (photo != null) {
+                    BitmapFactory.decodeFile(photo.absolutePath)?.let { bitmap ->
+                        found.addView(ImageView(this).apply {
+                            setImageBitmap(bitmap)
+                            adjustViewBounds = true
+                            scaleType = ImageView.ScaleType.CENTER_CROP
+                            maxHeight = dp(240)
+                            contentDescription = "Source Telegram offer photo"
+                            setOnClickListener { openPhoto(photo.absolutePath) }
+                        }, LinearLayout.LayoutParams(-1, dp(210)))
+                        found.addView(pad(10))
+                    }
+                }
                 found.addView(label(offer.price, 19f, Color.rgb(7, 112, 80), true))
                 found.addView(pad(5))
-                found.addView(label("UNVERIFIED · OCR-derived price", 12f, Color.rgb(166, 82, 20), true))
+                val stateText = if (offer.verified) "VERIFIED" else offer.reviewState.replace('_', ' ')
+                val stateColor = when { offer.verified -> Color.rgb(7, 112, 80); offer.reviewState == "UNCERTAIN" -> Color.rgb(166, 82, 20); else -> Color.rgb(173, 47, 47) }
+                found.addView(label("$stateText · OCR-derived", 12f, stateColor, true))
                 found.addView(pad(11))
-                found.addView(label("Branch: ${offer.branch}", 14f, ink))
+                found.addView(label("Branch: ${offer.branch} · ${offer.branchSource}", 14f, ink))
+                found.addView(label("Source date: ${offer.sourceDate}", 13f, muted))
                 found.addView(label("Telegram channel: ${offer.channel}", 14f, ink))
                 found.addView(label("Original post: ${formattedTime(offer.postTime)}", 13f, muted))
                 found.addView(label("Detected: ${formattedTime(offer.detectedTime)}", 13f, muted))
                 found.addView(pad(9))
                 found.addView(label("Confidence: ${offer.confidence}", 13f, ink, true))
                 found.addView(label("Method: ${offer.source}", 12f, muted))
+                found.addView(label("Assessment: ${offer.associationReason}", 12f, muted))
                 found.addView(pad(8))
                 found.addView(label("OCR evidence", 12f, muted, true))
                 found.addView(label(offer.evidence, 14f, ink))
                 found.addView(pad(12))
+                found.addView(button("Inspect OCR evidence", false) { inspectEvidence(offer) })
+                found.addView(pad(7))
+                if (photo != null) {
+                    found.addView(button("View saved source photo", false) { openPhoto(photo.absolutePath) })
+                    found.addView(pad(7))
+                }
                 if (offer.messageLink.isNotBlank()) {
-                    found.addView(button("View source photo / post in Telegram") { openTelegram(offer.messageLink) })
+                    found.addView(button("Open original Telegram post") { openTelegram(offer.messageLink) })
                 } else {
                     found.addView(label("Telegram link is still being resolved; tap Refresh shortly.", 12f, muted))
                 }
