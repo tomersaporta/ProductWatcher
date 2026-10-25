@@ -5,13 +5,17 @@ plugins {
 
 android {
     namespace = "com.productwatcher.app"
-    compileSdk = 35
+    // TDLib's Android AAR is compiled against API 36. This does not opt the
+    // installed app into Android 16 behavior; targetSdk intentionally stays 35.
+    compileSdk = 36
     defaultConfig {
         applicationId = "com.productwatcher.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // Keep upgrades installable over the previously published versionCode 2
+        // build so Android retains the existing Telegram session and app data.
+        versionCode = 3
+        versionName = "0.4.2"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
