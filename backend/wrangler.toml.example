@@ -1,0 +1,20 @@
+name = "productwatcher-vision"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+# Select an image-input + Structured Outputs model available to your OpenAI project.
+OPENAI_MODEL = "replace-with-supported-model-id"
+DAILY_REQUEST_LIMIT = "100"
+CACHE_TTL_SECONDS = "2592000"
+# Optional estimates shown in the Android UI; set these from current pricing.
+INPUT_COST_PER_MILLION = "0"
+OUTPUT_COST_PER_MILLION = "0"
+
+[[kv_namespaces]]
+binding = "RATE_LIMITS"
+id = "replace-with-kv-namespace-id"
+
+[[kv_namespaces]]
+binding = "VISION_CACHE"
+id = "replace-with-kv-namespace-id"

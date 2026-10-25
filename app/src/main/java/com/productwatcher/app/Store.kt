@@ -26,7 +26,19 @@ data class FoundOffer(
     val branchSource: String,
     val verified: Boolean,
     val messageLink: String,
-    val photoPath: String
+    val photoPath: String,
+    val exactModel: String,
+    val priceIls: Int?,
+    val caption: String,
+    val visionEvidence: String,
+    val priceRegion: String,
+    val productRegion: String,
+    val sourceImagePath: String,
+    val thumbnailPath: String,
+    val imageIdentifier: String,
+    val modelVersion: String,
+    val analysisTimestamp: Long,
+    val auditTrail: String
 )
 
 data class FoundOfferSave(val offer: FoundOffer, val inserted: Boolean)
@@ -44,6 +56,17 @@ object Store {
     fun deleteTelegramImages(ctx: Context): Boolean = prefs(ctx).getBoolean("delete_telegram_images", true)
     fun setDeleteTelegramImages(ctx: Context, enabled: Boolean) = prefs(ctx).edit().putBoolean("delete_telegram_images", enabled).apply()
     fun scanGeneration(ctx: Context): Long = prefs(ctx).getLong("scan_generation", 0L)
+    @Synchronized fun requestVisionRescan(ctx: Context, maxPosts: Int = 50) {
+        prefs(ctx).edit().putInt("vision_rescan_budget", maxPosts.coerceIn(1, 200)).apply()
+        requestFullRescan(ctx)
+        setTelegramStatus(ctx, "Bounded cloud-image rescan requested · up to ${maxPosts.coerceIn(1, 200)} candidate posts")
+    }
+    @Synchronized fun visionCandidates(ctx: Context, automatic: List<String>): List<String> {
+        val p = prefs(ctx); val remaining = p.getInt("vision_rescan_budget", 0)
+        if (remaining <= 0) return automatic
+        p.edit().putInt("vision_rescan_budget", remaining - 1).apply()
+        return products(ctx)
+    }
     /** One-time, non-destructive backfill for the current structured offer schema. */
     @Synchronized fun ensureStructuredOfferBackfill(ctx: Context) {
         val p = prefs(ctx)
@@ -164,6 +187,12 @@ object Store {
         put("confidence_score", offer.confidenceScore); put("review_state", offer.reviewState)
         put("association_reason", offer.associationReason); put("branch_source", offer.branchSource)
         put("verified", offer.verified); put("message_link", offer.messageLink); put("photo_path", offer.photoPath)
+        put("exact_model", offer.exactModel); put("price_ils", offer.priceIls ?: JSONObject.NULL)
+        put("caption", offer.caption); put("vision_evidence", offer.visionEvidence)
+        put("price_region", offer.priceRegion); put("product_region", offer.productRegion)
+        put("source_image_path", offer.sourceImagePath); put("thumbnail_path", offer.thumbnailPath)
+        put("image_identifier", offer.imageIdentifier); put("model_version", offer.modelVersion)
+        put("analysis_timestamp", offer.analysisTimestamp); put("audit_trail", offer.auditTrail)
     }
 
     private fun parseOffer(obj: JSONObject): FoundOffer? = runCatching {
@@ -182,9 +211,19 @@ object Store {
             reviewState = obj.optString("review_state", "REVIEW_NEEDED"),
             associationReason = obj.optString("association_reason", "Legacy match requires review"),
             branchSource = obj.optString("branch_source", "Unknown"),
-            verified = obj.optBoolean("verified", false),
+            // Historical automated detections must never silently become human/store verified.
+            verified = false,
             messageLink = obj.optString("message_link", ""),
-            photoPath = obj.optString("photo_path", "")
+            photoPath = obj.optString("photo_path", ""),
+            exactModel = obj.optString("exact_model", obj.optString("product")),
+            priceIls = if (obj.isNull("price_ils") || !obj.has("price_ils")) null else obj.optInt("price_ils"),
+            caption = obj.optString("caption", ""), visionEvidence = obj.optString("vision_evidence", ""),
+            priceRegion = obj.optString("price_region", ""), productRegion = obj.optString("product_region", ""),
+            sourceImagePath = obj.optString("source_image_path", ""),
+            thumbnailPath = obj.optString("thumbnail_path", obj.optString("photo_path", "")),
+            imageIdentifier = obj.optString("image_identifier", ""), modelVersion = obj.optString("model_version", ""),
+            analysisTimestamp = obj.optLong("analysis_timestamp", 0L),
+            auditTrail = obj.optString("audit_trail", "[]")
         )
     }.getOrNull()
 
@@ -206,7 +245,10 @@ object Store {
         postTime: Long,
         metadata: SourceMetadata,
         channel: String,
-        photoPath: String?
+        sourceImagePath: String?,
+        thumbnailPath: String?,
+        imageIdentifier: String?,
+        caption: String
     ): FoundOfferSave {
         val id = OfferIdentity.key(chatId, messageId, offer.product)
         val items = foundOffers(ctx).toMutableList()
@@ -235,7 +277,16 @@ object Store {
             branchSource = metadata.branchSource ?: previous?.branchSource ?: "Unknown",
             verified = false,
             messageLink = previous?.messageLink.orEmpty(),
-            photoPath = photoPath ?: previous?.photoPath.orEmpty()
+            photoPath = thumbnailPath ?: previous?.photoPath.orEmpty(),
+            exactModel = previous?.exactModel ?: offer.product,
+            priceIls = offer.price?.let { OfferExtractor.prices(it).singleOrNull()?.toIntOrNull() },
+            caption = caption.take(1000), visionEvidence = previous?.visionEvidence.orEmpty(),
+            priceRegion = previous?.priceRegion.orEmpty(), productRegion = previous?.productRegion.orEmpty(),
+            sourceImagePath = sourceImagePath ?: previous?.sourceImagePath.orEmpty(),
+            thumbnailPath = thumbnailPath ?: previous?.thumbnailPath.orEmpty(),
+            imageIdentifier = imageIdentifier ?: previous?.imageIdentifier.orEmpty(),
+            modelVersion = previous?.modelVersion.orEmpty(), analysisTimestamp = previous?.analysisTimestamp ?: 0L,
+            auditTrail = appendAudit(previous?.auditTrail, "LOCAL_OCR", offer.price, offer.associationReason)
         )
         if (index >= 0) items[index] = record else items.add(record)
         val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
@@ -245,6 +296,72 @@ object Store {
             .putString(productPrefix(offer.product) + "last_offer", description)
             .apply()
         return FoundOfferSave(record, index < 0)
+    }
+
+    private fun appendAudit(existing: String?, status: String, price: String?, reason: String): String {
+        val arr = runCatching { JSONArray(existing ?: "[]") }.getOrDefault(JSONArray())
+        arr.put(JSONObject().apply {
+            put("at", System.currentTimeMillis()); put("status", status); put("price", price ?: JSONObject.NULL)
+            put("reason", reason.take(240))
+        })
+        val compact = JSONArray()
+        for (i in maxOf(0, arr.length() - 20) until arr.length()) compact.put(arr.get(i))
+        return compact.toString()
+    }
+
+    @Synchronized fun applyVisionResults(
+        ctx: Context, job: VisionJob, results: List<ValidatedVisionMatch>, modelVersion: String, analyzedAt: Long
+    ): List<FoundOffer> {
+        val items = foundOffers(ctx).toMutableList()
+        val updated = mutableListOf<FoundOffer>()
+        results.forEach { result ->
+            val id = OfferIdentity.key(job.chatId, job.messageId, result.product)
+            val index = items.indexOfFirst { it.id == id }
+            val previous = items.getOrNull(index) ?: return@forEach
+            val priceText = result.priceIls?.let { "₪$it (image-supported)" } ?: "Price unknown · review required"
+            val next = previous.copy(
+                price = priceText, priceIls = result.priceIls, exactModel = result.exactModel,
+                branch = previous.branch.takeUnless { it == "Branch not identified" } ?: result.branch ?: previous.branch,
+                evidence = previous.evidence, visionEvidence = result.evidence,
+                source = "local OCR + cloud image analysis", confidence = "${(result.confidence * 100).toInt()}% · ${result.reason}",
+                confidenceScore = result.confidence, reviewState = result.verificationStatus,
+                associationReason = result.reason, verified = false,
+                priceRegion = result.priceRegion, productRegion = result.productRegion,
+                modelVersion = modelVersion, analysisTimestamp = analyzedAt,
+                auditTrail = appendAudit(previous.auditTrail, result.verificationStatus, priceText, result.reason)
+            )
+            items[index] = next; updated.add(next)
+        }
+        val matchedIds = results.map { OfferIdentity.key(job.chatId, job.messageId, it.product) }.toSet()
+        items.indices.filter { items[it].chatId == job.chatId && items[it].messageId == job.messageId && items[it].id !in matchedIds && items[it].reviewState == "PENDING_ANALYSIS" }
+            .forEach { i -> items[i] = items[i].copy(reviewState = "UNCERTAIN", associationReason = "Cloud analysis did not confirm the watched model",
+                auditTrail = appendAudit(items[i].auditTrail, "UNCERTAIN", null, "Cloud analysis did not confirm the watched model")) }
+        val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
+        prefs(ctx).edit().putString("found_offers_v1", arr.toString()).apply()
+        return updated
+    }
+
+    @Synchronized fun markVisionFailed(ctx: Context, chatId: Long, messageId: Long, reason: String) {
+        val items = foundOffers(ctx).toMutableList()
+        items.indices.filter { items[it].chatId == chatId && items[it].messageId == messageId && items[it].reviewState == "PENDING_ANALYSIS" }
+            .forEach { i -> items[i] = items[i].copy(reviewState = "ANALYSIS_FAILED", associationReason = reason,
+                auditTrail = appendAudit(items[i].auditTrail, "ANALYSIS_FAILED", null, reason)) }
+        val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
+        prefs(ctx).edit().putString("found_offers_v1", arr.toString()).apply()
+    }
+
+    @Synchronized fun expireOfferImages(ctx: Context, cutoff: Long): Int {
+        val items = foundOffers(ctx).toMutableList(); var removed = 0
+        items.indices.filter { items[it].detectedTime < cutoff }.forEach { i ->
+            val offer = items[i]
+            listOf(offer.sourceImagePath, offer.thumbnailPath).filter { it.isNotBlank() }.distinct().forEach { path ->
+                if (java.io.File(path).delete()) removed++
+            }
+            items[i] = offer.copy(sourceImagePath = "", thumbnailPath = "", photoPath = "")
+        }
+        val arr = JSONArray(); items.forEach { arr.put(offerJson(it)) }
+        prefs(ctx).edit().putString("found_offers_v1", arr.toString()).apply()
+        return removed
     }
 
     @Synchronized fun updateOfferLink(ctx: Context, id: String, link: String): FoundOffer? {

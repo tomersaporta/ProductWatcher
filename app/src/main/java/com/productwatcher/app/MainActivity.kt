@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
     private val liveUpdater = object : Runnable {
         override fun run() {
             val offerFingerprint = Store.foundOffers(this@MainActivity).joinToString("|") {
-                it.id + it.messageLink + it.price + it.reviewState + it.photoPath
+                it.id + it.messageLink + it.price + it.reviewState + it.thumbnailPath + it.analysisTimestamp
             }
             if (offerFingerprint != renderedOfferFingerprint) {
                 render()
@@ -123,13 +123,36 @@ class MainActivity : ComponentActivity() {
     }
     private fun inspectEvidence(offer: FoundOffer) {
         AlertDialog.Builder(this)
-            .setTitle("OCR evidence · ${offer.product}")
-            .setMessage("${offer.evidence}\n\nAssociation: ${offer.associationReason}\n" +
+            .setTitle("OCR / image evidence · ${offer.product}")
+            .setMessage("Local OCR:\n${offer.evidence}\n\nCloud image evidence:\n${offer.visionEvidence.ifBlank { "Not available" }}\n\nAssociation: ${offer.associationReason}\n" +
                 "Confidence: ${offer.confidence}\nState: ${offer.reviewState}\n" +
-                "Price is not verified unless explicitly reviewed by a person.")
+                "Image-supported does not mean store-verified. Review the source post before purchase.")
             .setPositiveButton("Close", null)
             .apply {
                 if (offer.messageLink.isNotBlank()) setNeutralButton("Open Telegram") { _, _ -> openTelegram(offer.messageLink) }
+            }.show()
+    }
+    private fun cloudSettingsDialog() {
+        val endpoint = EditText(this).apply { hint = "https://your-worker.example.workers.dev"; setText(CloudVisionSettings.endpoint(this@MainActivity)); setSingleLine() }
+        val token = EditText(this).apply {
+            hint = "Proxy access token"; setText(CloudVisionSettings.token(this@MainActivity)); setSingleLine()
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        }
+        val enabled = CheckBox(this).apply { text = "Enable opt-in cloud image analysis"; isChecked = CloudVisionSettings.enabled(this@MainActivity) }
+        val retention = EditText(this).apply {
+            hint = "Private image retention days"; setText(CloudVisionSettings.retentionDays(this@MainActivity).toString())
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER; setSingleLine()
+        }
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(5), dp(20), 0)
+            addView(label("Telegram login data is never uploaded. Candidate images, caption and OCR evidence are sent only to your configured proxy.", 12f, muted))
+            addView(pad(10)); addView(endpoint); addView(token); addView(enabled); addView(retention)
+        }
+        AlertDialog.Builder(this).setTitle("Cloud image analysis").setView(layout)
+            .setNegativeButton("Cancel", null).setPositiveButton("Save") { _, _ ->
+                CloudVisionSettings.configure(this, enabled.isChecked, endpoint.text.toString(), token.text.toString())
+                CloudVisionSettings.setRetentionDays(this, retention.text.toString().toIntOrNull() ?: 30)
+                render()
             }.show()
     }
     private fun share() {
@@ -191,7 +214,7 @@ class MainActivity : ComponentActivity() {
             if (focusedOffer == null) list else list.sortedByDescending { it.id == focusedOffer }
         }
         renderedOfferFingerprint = offers.joinToString("|") {
-            it.id + it.messageLink + it.price + it.reviewState + it.photoPath
+            it.id + it.messageLink + it.price + it.reviewState + it.thumbnailPath + it.analysisTimestamp
         }
         if (offers.isEmpty()) {
             val empty = card()
@@ -208,7 +231,7 @@ class MainActivity : ComponentActivity() {
                 }
                 found.addView(label(offer.product, 20f, navy, true))
                 found.addView(pad(6))
-                val photo = offer.photoPath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
+                val photo = offer.thumbnailPath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
                 if (photo != null) {
                     BitmapFactory.decodeFile(photo.absolutePath)?.let { bitmap ->
                         found.addView(ImageView(this).apply {
@@ -224,10 +247,17 @@ class MainActivity : ComponentActivity() {
                 }
                 found.addView(label(offer.price, 19f, Color.rgb(7, 112, 80), true))
                 found.addView(pad(5))
-                val stateText = if (offer.verified) "VERIFIED" else offer.reviewState.replace('_', ' ')
-                val stateColor = when { offer.verified -> Color.rgb(7, 112, 80); offer.reviewState == "UNCERTAIN" -> Color.rgb(166, 82, 20); else -> Color.rgb(173, 47, 47) }
-                found.addView(label("$stateText · OCR-derived", 12f, stateColor, true))
+                val stateText = if (offer.verified) "HUMAN VERIFIED" else offer.reviewState.replace('_', ' ')
+                val stateColor = when {
+                    offer.verified || offer.reviewState == "VERIFIED_BY_IMAGE" -> Color.rgb(7, 112, 80)
+                    offer.reviewState == "PENDING_ANALYSIS" -> blue
+                    offer.reviewState == "UNCERTAIN" -> Color.rgb(166, 82, 20)
+                    else -> Color.rgb(173, 47, 47)
+                }
+                found.addView(label(stateText, 12f, stateColor, true))
+                if (offer.reviewState == "VERIFIED_BY_IMAGE") found.addView(label("Image-supported · not store-verified", 11f, muted))
                 found.addView(pad(11))
+                found.addView(label("Exact model: ${offer.exactModel}", 14f, ink, true))
                 found.addView(label("Branch: ${offer.branch} · ${offer.branchSource}", 14f, ink))
                 found.addView(label("Source date: ${offer.sourceDate}", 13f, muted))
                 found.addView(label("Telegram channel: ${offer.channel}", 14f, ink))
@@ -236,15 +266,24 @@ class MainActivity : ComponentActivity() {
                 found.addView(pad(9))
                 found.addView(label("Confidence: ${offer.confidence}", 13f, ink, true))
                 found.addView(label("Method: ${offer.source}", 12f, muted))
+                if (offer.modelVersion.isNotBlank()) found.addView(label("Cloud model: ${offer.modelVersion} · analyzed ${formattedTime(offer.analysisTimestamp)}", 12f, muted))
                 found.addView(label("Assessment: ${offer.associationReason}", 12f, muted))
                 found.addView(pad(8))
                 found.addView(label("OCR evidence", 12f, muted, true))
                 found.addView(label(offer.evidence, 14f, ink))
+                if (offer.visionEvidence.isNotBlank()) {
+                    found.addView(pad(6)); found.addView(label("Image evidence", 12f, muted, true)); found.addView(label(offer.visionEvidence, 14f, ink))
+                }
                 found.addView(pad(12))
-                found.addView(button("Inspect OCR evidence", false) { inspectEvidence(offer) })
+                found.addView(button("Inspect OCR / image evidence", false) { inspectEvidence(offer) })
                 found.addView(pad(7))
                 if (photo != null) {
                     found.addView(button("View saved source photo", false) { openPhoto(photo.absolutePath) })
+                    found.addView(pad(7))
+                }
+                val fullSource = offer.sourceImagePath.takeIf { it.isNotBlank() }?.let(::File)?.takeIf { it.isFile }
+                if (fullSource != null) {
+                    found.addView(button("View full source image", false) { openPhoto(fullSource.absolutePath) })
                     found.addView(pad(7))
                 }
                 if (offer.messageLink.isNotBlank()) {
@@ -321,7 +360,22 @@ class MainActivity : ComponentActivity() {
             setOnCheckedChangeListener { _, checked -> Store.setDeleteTelegramImages(this@MainActivity, checked) }
         }
         activity.addView(deleteImages)
-        activity.addView(label("Images are deleted only after processing finishes. Failed scans keep their files for retry; Telegram posts are never deleted.", 12f, muted))
+        activity.addView(label("Only TDLib's cache copy is deleted. App-private source images used by saved matches follow the retention controls below. Telegram posts are never deleted.", 12f, muted))
+        activity.addView(pad(12))
+        val cloudState = if (CloudVisionSettings.ready(this)) "Enabled" else if (CloudVisionSettings.enabled(this)) "Configuration incomplete" else "Disabled"
+        activity.addView(label("Cloud image analysis: $cloudState", 14f, ink, true))
+        activity.addView(label("Today: ${CloudVisionSettings.dailyRequests(this)} requests · estimated backend-reported cost $${"%.4f".format(CloudVisionSettings.dailyCost(this))}", 12f, muted))
+        activity.addView(pad(8))
+        activity.addView(button("Configure cloud analysis", false) { cloudSettingsDialog() })
+        activity.addView(pad(8))
+        activity.addView(button("Analyze up to 50 historical posts", false) {
+            if (!CloudVisionSettings.ready(this)) Toast.makeText(this, "Configure and enable the HTTPS cloud proxy first", Toast.LENGTH_LONG).show()
+            else { Store.requestVisionRescan(this, 50); TelegramClient.scanSelectedChannel(); render() }
+        })
+        activity.addView(pad(8))
+        activity.addView(button("Clean expired private images", false) {
+            Toast.makeText(this, "Removed ${CloudVisionQueue.cleanup(this)} expired image files", Toast.LENGTH_LONG).show(); render()
+        })
         activity.addView(pad(12))
         activity.addView(button("Rescan full Telegram history", false) {
             Store.requestFullRescan(this)
@@ -331,6 +385,6 @@ class MainActivity : ComponentActivity() {
         activity.addView(pad(9))
         activity.addView(button("Share status report", false) { share() })
         body.addView(activity)
-        body.addView(label("Direct TDLib connection · On-device Telegram photo OCR · Background catch-up", 12f, muted))
+        body.addView(label("Direct TDLib connection · On-device OCR · Optional authenticated cloud image analysis · Background catch-up", 12f, muted))
     }
 }

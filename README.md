@@ -1,6 +1,6 @@
 # ProductWatcher — Telegram deal monitor (Android)
 
-This Android application monitors Telegram channels selected by the user through the local TDLib client, reads text from posted photos on-device using bundled Google ML Kit Latin OCR, and sends Android notifications for watched product models.
+This Android application monitors Telegram channels selected by the user through the local TDLib client and reads text from posted photos on-device using bundled Google ML Kit OCR. An optional, explicitly enabled HTTPS proxy can add cloud image analysis without placing an OpenAI API key or Telegram credentials in the APK.
 
 ## Features
 
@@ -8,6 +8,9 @@ This Android application monitors Telegram channels selected by the user through
 - Watches several product names and several selected channels.
 - Distinguishes `Dreame X60 Ultra` / `X60 Ultra Complete` from `Dreame X60 Pro Ultra`, `X60 Max Ultra`, `X50 Ultra` and `X40 Ultra`.
 - Associates prices to product names using the locations of recognized text lines; with multiple prices, reports *price unknown* when assignment is ambiguous rather than taking the first price.
+- Recall-oriented candidate screening recognizes partial/split model hints. Optional cloud analysis upgrades candidates only after exact-model, plausible-price and same-tile evidence passes deterministic checks on-device.
+- Cloud failures remain pending/failed instead of falling back to speculative prices. Only image-supported, high-confidence matches alert; OCR-only prices remain unverified.
+- Durable app-private source images and thumbnails remain available after optional TDLib cache cleanup. Match history includes OCR/image evidence, source links, regions, model version and a bounded audit trail.
 - Background monitoring starts automatically when a channel is selected; explicit Stop is remembered.
 - On app open, restarts monitoring if it was enabled. On reboot, WorkManager re-registers periodic catch-up; Android 15+ may defer scans and impose a foreground-service quota.
 - New watched product automatically triggers bounded full Telegram-history rescan; progress/cursor survives process recreation. Recent posts are checked first, historical messages in groups of up to four pages (400 posts) per scan cycle. Missing-post gaps after long background suspension are backfilled separately.
@@ -31,6 +34,10 @@ Your existing Telegram session and watchlist are saved in Android's local app da
 
 GitHub Actions runs Kotlin regression tests and creates the `ProductWatcher-debug-apk` artifact. Inspect Actions for `BUILD SUCCESSFUL` before installing.
 
+## Optional cloud image analysis
+
+Deploy the authenticated serverless proxy documented in [`backend/README.md`](backend/README.md), then use **Configure cloud analysis** in the app. Cloud analysis is disabled by default and monitoring continues locally when it is unavailable. The backend model is selected through its `OPENAI_MODEL` environment variable so deployments can use a currently supported image-input model with Structured Outputs without shipping a model identifier in the APK.
+
 ## Verification
 
 JVM-only model matching regression tests also run without an Android SDK:
@@ -44,7 +51,7 @@ On Android: open the app, verify the monitor is enabled and your Telegram source
 
 ## Known limits
 
-- Google ML Kit Latin recognition does not reliably read Hebrew store branch names. Branches are displayed as unidentified rather than fabricated.
+- Local OCR may miss Hebrew text; caption-derived branches are preferred, image/OCR evidence is used only when present, and unknown values remain unknown.
 - Image OCR accuracy varies with photograph resolution, glare and font size; price/model matching is only as good as the recognized text. OCR snippets are for diagnosis and stay on-device unless the user explicitly shares a status report.
 - Android background execution is best effort: exact 24/7 live monitoring and instant notification are not guaranteed by WorkManager or foreground-service quotas.
-- The Kotlin matching/extraction logic has been tested in a local JVM, but this patch has **not** been compiled into an Android APK or verified against a real Telegram session here. The GitHub Actions build and device testing are still required.
+- Automated tests use synthetic/fixture OCR geometry and simulated cloud output. They do not establish perfect accuracy on every real retail image; maintain a labeled evaluation set before changing alert thresholds.

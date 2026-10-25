@@ -70,7 +70,7 @@ object TelegramClient {
                     useFileDatabase = true; useChatInfoDatabase = true; useMessageDatabase = true; useSecretChats = false
                     apiId = p.getInt("api_id", 0); apiHash = p.getString("api_hash", "").orEmpty()
                     systemLanguageCode = "en"; deviceModel = android.os.Build.MODEL
-                    systemVersion = android.os.Build.VERSION.RELEASE; applicationVersion = "0.6"
+                    systemVersion = android.os.Build.VERSION.RELEASE; applicationVersion = "0.7"
                 })
             }
             is TdApi.AuthorizationStateWaitPhoneNumber -> state = "Enter phone number"

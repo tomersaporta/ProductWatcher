@@ -33,7 +33,8 @@ object SourceMetadataExtractor {
     )
 
     private fun branch(value: String): String? = branchPatterns.firstNotNullOfOrNull { pattern ->
-        pattern.find(value)?.groupValues?.getOrNull(1)?.trim()?.replace(Regex("\\s+"), " ")?.take(70)
+        pattern.find(value)?.groupValues?.getOrNull(1)?.trim()?.replace(Regex("\\s+"), " ")
+            ?.replace(Regex("^אושר\\s*עד\\s*", RegexOption.IGNORE_CASE), "")?.take(70)
     }
 
     fun extract(caption: String, ocr: String): SourceMetadata {
@@ -63,7 +64,7 @@ object MessageLinkPolicy {
 
 object OfferAlertPolicy {
     fun shouldAlert(verified: Boolean, reviewState: String, confidenceScore: Double, price: String): Boolean =
-        verified || (reviewState == "UNCERTAIN" && confidenceScore >= 0.75 && !price.startsWith("Price unknown"))
+        verified || (reviewState == "VERIFIED_BY_IMAGE" && confidenceScore >= 0.90 && !price.startsWith("Price unknown"))
 }
 
 /** Associates a tag with the nearest model printed ABOVE it and in the same image column. */

@@ -14,8 +14,8 @@ android {
         targetSdk = 35
         // Keep upgrades installable over earlier builds so Android retains the
         // existing Telegram session, watchlist and app data.
-        versionCode = 5
-        versionName = "0.6.0"
+        versionCode = 6
+        versionName = "0.7.0"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
